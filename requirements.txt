@@ -1,0 +1,23 @@
+# Local development environment (Windows, CPU only).
+#
+# JAX ships official Windows CPU wheels; there is no TPU and no CUDA here.
+# Pallas kernels are developed and correctness-tested locally under interpret
+# mode, which runs pallas_call as a jitted scan over the grid on CPU.
+#
+# Performance work happens on Colab TPU v5e, which provides its own JAX build --
+# do NOT pip install jax in the Colab TPU runtime, it will break libtpu.
+#
+# Python 3.12 to match the Colab runtime (3.12.x).
+
+jax>=0.11.0
+numpy>=2.0
+
+# Testing
+pytest>=8.0
+
+# Benchmarks and plots
+matplotlib>=3.9
+
+# Reading TPU profiler traces downloaded from Colab.
+tensorboard>=2.18
+tensorboard-plugin-profile>=2.18
