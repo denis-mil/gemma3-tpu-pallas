@@ -13,3 +13,6 @@ traces/
 # Benchmark outputs
 results/*.png
 results/*.json
+
+# Machine-local Claude Code settings
+.claude/settings.local.json
