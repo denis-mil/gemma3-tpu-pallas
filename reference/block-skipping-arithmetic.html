@@ -57,9 +57,30 @@
 
   <p><b>Why it is only two comparisons.</b> Over the tile, the diagonal
   <code>d = q − k</code> sweeps the contiguous interval
-  <code>[q<sub>lo</sub>−k<sub>hi</sub>, q<sub>hi</sub>−k<sub>lo</sub>]</code>. The mask is
-  the band <code>0 ≤ d ≤ W−1</code>. Two intervals intersect iff neither ends before the
-  other begins.</p>
+  <code>[q<sub>lo</sub>−k<sub>hi</sub>, q<sub>hi</sub>−k<sub>lo</sub>]</code> — contiguous
+  because a rectangular tile is a dense product of two contiguous ranges. The mask is the
+  band <code>0 ≤ d ≤ W−1</code>. <b>live</b> asks whether the two intervals
+  <i>intersect</i>; <b>full</b> asks whether the band <i>contains</i> the tile's interval.
+  Same two intervals, two different relations.</p>
+
+  <p class="sidenote">
+    The minimum sits at <code>(q<sub>lo</sub>, k<sub>hi</sub>)</code> because <code>d</code>
+    grows with <code>q</code> and shrinks with <code>k</code>. Derive the corner from the
+    sign rather than memorising it.
+  </p>
+
+  <div class="note">
+    <span class="note-label">Hull relaxation is sound, not exact</span>
+    <p>Testing endpoints means testing the <i>hull</i>
+    <code>[d<sub>min</sub>, d<sub>max</sub>]</code> in place of the set of <code>d</code>
+    values actually achieved. The hull can only be larger, so for a mask that is
+    <i>not</i> a band — where the achieved set may have holes — <b>live</b> can
+    false-positive (a tile loaded that was dead: one wasted DMA) and <b>full</b> can
+    false-negative (an elementwise mask applied that was a no-op: one wasted pass).
+    Both errors cost work; neither costs correctness. <b>Contiguity buys exactness, not
+    validity.</b> Hull-relaxing an unfamiliar mask is always safe — the only question is
+    how much work it wastes.</p>
+  </div>
 
   <div class="warn">
     <span class="note-label">Verified</span>

@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 02 · The normaliser you don't have yet</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Lesson 02 · Windowed prefill</p>
+  <h1>The normaliser you don't have yet</h1>
+  <p class="standfirst">
+    Softmax needs a denominator over every score. A flash kernel only ever holds one
+    tile of them. The fix is not an approximation — it is an accumulator you are
+    allowed to correct after the fact.
+  </p>
+
+  <p>
+    <a href="0001-the-mask-is-a-work-map.html">Lesson 01</a> ended with a kernel that knows
+    which tiles to load. Now it has to do something with one. You load a tile of keys,
+    compute its slice of <code>QK<sup>T</sup></code>, and immediately hit a wall:
+    <b>softmax needs a sum over all the scores in the row</b>, and you are holding two per
+    cent of them.
+  </p>
+
+  <p>
+    The obvious escape is two passes — sweep once to find the denominator, sweep again to
+    use it. Look at what that costs. A second sweep means loading every live KV tile
+    twice, and lesson 01 was an entire lesson about the fact that <i>loading KV tiles is
+    the thing you are minimising</i>. Two-pass softmax hands back the win you just spent a
+    lesson earning.
+  </p>
+
+  <p>
+    So: one pass. Which means committing to a denominator before you have seen the data
+    that determines it.
+  </p>
+
+  <h2>1 · Four numbers, by hand</h2>
+
+  <p class="sidenote">
+    One query row, four keys, two tiles of two. Small enough that you can check every
+    figure below on paper — and you should, because the general form in §2 is worth
+    nothing if this part is a black box.
+  </p>
+
+  <p>
+    Scores <code>[1, 3]</code> arrive first, then <code>[5, 2]</code>. Do what safe softmax
+    does — subtract the max — except the only max you have is <b>the max so far</b>.
+  </p>
+
+  <p>
+    <b>Tile 0.</b> Running max <code>m = 3</code>. Accumulate:
+  </p>
+
+  <p class="eq">
+    ℓ<sub>0</sub> = e<sup>1−3</sup> + e<sup>3−3</sup> = 0.135335 + 1 = <b>1.135335</b>
+  </p>
+
+  <p>
+    <b>Tile 1 arrives, and it contains a 5.</b> The running max jumps to
+    <code>m = 5</code>, and every term in <code>ℓ<sub>0</sub></code> is now based on the
+    wrong one. You do not have those scores any more — the tile is gone. What you do have
+    is a single number, and a single number is enough:
+  </p>
+
+  <p class="eq">
+    e<sup>3−5</sup> · (e<sup>1−3</sup> + e<sup>3−3</sup>) &nbsp;=&nbsp;
+    e<sup>1−5</sup> + e<sup>3−5</sup>
+  </p>
+
+  <p>
+    Read that line twice, because it is the entire lesson. Multiplying by
+    <code>e<sup>m<sub>old</sub>−m<sub>new</sub></sup></code> distributes across the sum and
+    <b>the old max cancels out of every term at once</b>. The accumulator is not corrected
+    approximately, or on average. It is rebased exactly, at a cost of one multiply,
+    whatever it happened to contain.
+  </p>
+
+  <p>So finish the pass:</p>
+
+  <p class="eq">
+    ℓ<sub>1</sub> = 0.135335 · 1.135335 + e<sup>5−5</sup> + e<sup>2−5</sup><br>
+    = 0.153651 + 1 + 0.049787 = <b>1.203438</b>
+  </p>
+
+  <p>
+    And the two-pass answer, computed the ordinary way with the true max in hand:
+    <code>e<sup>1−5</sup> + e<sup>3−5</sup> + e<sup>5−5</sup> + e<sup>2−5</sup></code>
+    = 0.018316 + 0.135335 + 1 + 0.049787 = <b>1.203438</b>. Identical.
+  </p>
+
+  <div class="warn">
+    <span class="note-label">Verified, not asserted</span>
+    <p>Every figure on this page was checked in float64 and float32 against
+    <code>numpy</code>. The two denominators above agree to the last bit. One honest
+    caveat: that is this example being kind. The rebasing is exact <i>in exact
+    arithmetic</i> — in floating point it carries the same rounding any summation does, so
+    online softmax is as accurate as safe softmax, <b>not more</b>. The widget in §4
+    reports which steps land bit-exact and which land a ulp away.</p>
+  </div>
+
+  <h2>2 · The recurrence</h2>
+
+  <p>
+    Now generalise what you just did. Tiles of scores <code>S<sub>1</sub> … S<sub>T</sub></code>
+    for one query row, with <code>m<sub>0</sub> = −∞</code> and
+    <code>ℓ<sub>0</sub> = 0</code>:
+  </p>
+
+  <p class="eq">
+    m<sub>j</sub> = max(m<sub>j−1</sub>, rowmax S<sub>j</sub>)<br>
+    α<sub>j</sub> = e<sup>m<sub>j−1</sub>−m<sub>j</sub></sup><br>
+    ℓ<sub>j</sub> = α<sub>j</sub> · ℓ<sub>j−1</sub> + Σ e<sup>S<sub>j</sub>−m<sub>j</sub></sup>
+  </p>
+
+  <p>
+    That is three lines and one of them is a max. But the denominator was never the point —
+    you want <b>PV</b>, the second matmul. The output accumulator takes <i>the same
+    α</i>:
+  </p>
+
+  <p class="eq">
+    O<sub>j</sub> = α<sub>j</sub> · O<sub>j−1</sub> + e<sup>S<sub>j</sub>−m<sub>j</sub></sup> V<sub>j</sub>
+    &nbsp;&nbsp;·&nbsp;&nbsp; answer = O<sub>T</sub> / ℓ<sub>T</sub>
+  </p>
+
+  <p class="sidenote">
+    <code>O<sub>j</sub></code> is a vector of length <code>head_dim</code> = 256; α is a
+    scalar per query row. Rescaling the output is a scalar–vector multiply, not another
+    matmul — which is why the whole scheme is affordable.
+  </p>
+
+  <p>
+    This is the step people drop. It is not enough to fix the denominator; the numerator
+    accumulated under the old max too, and it is rebased by exactly the same factor. Divide
+    once, at the very end.
+  </p>
+
+  <h2>3 · The invariant that makes it checkable</h2>
+
+  <p>
+    Here is the property to hold onto, because it is what you assert in a test when you
+    write this kernel for real:
+  </p>
+
+  <p class="eq">
+    ℓ<sub>j</sub> = Σ<sub>seen so far</sub> e<sup>s − m<sub>j</sub></sup>
+    &nbsp;&nbsp;and&nbsp;&nbsp;
+    O<sub>j</sub> / ℓ<sub>j</sub> = exact softmax attention over tiles 1…j
+  </p>
+
+  <p>
+    <b>Every intermediate state is a correct answer to a smaller problem.</b> Not a
+    partial result that only becomes meaningful at the end — a finished one, for the data
+    consumed so far. That is why a single pass is sufficient, and it is a far better
+    debugging handle than the final answer: a kernel that is wrong at tile 3 can be caught
+    at tile 3.
+  </p>
+
+  <h2>4 · Why the max, though?</h2>
+
+  <p>
+    Now the question your <a href="../MISSION.md">mission</a> actually names — why is the
+    running max <i>required</i> rather than merely convenient? The usual answer,
+    "numerical stability", is true and too vague to act on. Take it apart, because there
+    are two separate pressures and they want different things.
+  </p>
+
+  <p>
+    <b>First: the correction has nothing to do with the max.</b> Go back to §1 and look at
+    what made the rebasing work — <code>e<sup>a−b</sup></code> distributing over a sum. That
+    identity holds for <i>any</i> sequence of <code>m<sub>j</sub></code> you like. Freeze
+    <code>m</code> at zero, freeze it at tile 0's max, set it from a coin flip: the
+    recurrence still computes the exact softmax. The invariant in §3 never breaks. So
+    exactness is not what the max is buying, and if you thought it was, that is the
+    misconception to drop here.
+  </p>
+
+  <p>
+    <b>Second: two constraints do the real work.</b>
+  </p>
+
+  <ul>
+    <li><b>"Running" is forced by the single pass.</b> The global max is not available —
+      that is the entire premise. Whatever you subtract has to be computable from the
+      tiles you have already seen.</li>
+    <li><b>"Max" is forced by floating point.</b> Subtract the running max and every
+      exponent is <code>≤ 0</code>, so every term lands in <code>(0, 1]</code> — no
+      overflow is possible, ever, by construction. Not "unlikely on typical inputs". Not
+      possible.</li>
+  </ul>
+
+  <p>
+    That guarantee is worth pricing. <code>exp</code> overflows float32 above
+    <b>ln(3.4028×10<sup>38</sup>) = 88.72</b>; a score of 89 is <code>inf</code>, the row
+    sum is <code>inf</code>, and every probability comes back <code>NaN</code>. One score,
+    anywhere in a 32K-long row, and the row is gone.
+  </p>
+
+  <p class="sidenote">
+    Verified with <code>ml_dtypes</code>: bfloat16 tops out at 3.3895×10<sup>38</sup>,
+    ln = <b>88.72</b> — the same ceiling as float32, since bf16 trades mantissa bits (7 vs
+    23) for float32's exponent range. float16 would be a different story entirely:
+    ln(65504) = <b>11.09</b>, and a score of 12 overflows.
+  </p>
+
+  <p>
+    And one more property, easy to miss and load-bearing: <code>m<sub>j</sub></code> is
+    <b>non-decreasing</b>, so <code>m<sub>j−1</sub> − m<sub>j</sub> ≤ 0</code> and therefore
+    <code>α<sub>j</sub> ∈ (0, 1]</code> always. <b>The rescale can only ever shrink the
+    accumulator.</b> A correction factor that could exceed 1 would amplify whatever error
+    was already in there, once per tile, for every tile in the row. This one cannot. That is
+    the difference between a recurrence that is stable over hundreds of steps and one that
+    merely works on your test case.
+  </p>
+
+  <div class="win">
+    <span class="note-label">The win</span>
+    <p><b>"Running" comes from the algorithm; "max" comes from the hardware.</b> The
+    recurrence would be exact without the max, and useless. The max makes it
+    representable — bounded exponents, and a correction factor that never amplifies.
+    That is the answer to "why required rather than convenient", and it is the shape of
+    argument you will make again for every accumulator you ever put in a kernel.</p>
+  </div>
+
+  <h2>5 · Break it yourself</h2>
+
+  <p>
+    Set <b>subtract</b> to <i>subtract nothing</i> or <i>freeze m at tile 0</i> and watch
+    the invariant column: it keeps holding, exactly as §4 claims, right up until the floats
+    give out. Try the <i>spike</i> preset in float32 — then switch to float64 and watch the
+    same recurrence survive. Nothing about the algorithm changed; only the range did.
+  </p>
+
+  <div id="sim"></div>
+
+  <h2>6 · Retrieve it</h2>
+
+  <p>
+    Derive rather than recognise. Question 5 reaches back to lesson 01 — that mixing is
+    deliberate.
+  </p>
+
+  <div id="quiz"></div>
+
+</article>
+
+<footer class="footer">
+
+  <h3>Read this next</h3>
+  <p>
+    <a href="https://arxiv.org/abs/1805.02867">Online normalizer calculation for
+    softmax</a> (Milakov &amp; Gimelshein, NVIDIA, 2018) — <b>§3, and Algorithm 3</b>.
+    Four pages, and it is the origin of the recurrence above:
+    <code>d<sub>j</sub> ← d<sub>j−1</sub>·e<sup>m<sub>j−1</sub>−m<sub>j</sub></sup> +
+    e<sup>x<sub>j</sub>−m<sub>j</sub></sup></code>, proved correct by induction. Read the
+    induction — it is the formal version of the invariant in §3. FlashAttention inherits
+    this wholesale; this is where it comes from.
+  </p>
+
+  <div class="warn">
+    <span class="note-label">Correction to lesson 01</span>
+    <p>Lesson 01's footer had FlashAttention's sections the wrong way round. In
+    <a href="https://arxiv.org/abs/2205.14135">arXiv:2205.14135</a>, <b>§3.1</b> is
+    "An Efficient Attention Algorithm With Tiling and Recomputation" — the tiling
+    <i>and</i> the online-softmax recurrence, as Algorithm 1 with <code>m</code> and
+    <code>ℓ</code>. <b>§3.2</b> is "Analysis: IO Complexity". So §3.1 is <i>this</i>
+    lesson's reading, and §3.2 is the memory-traffic argument that lesson 01 should have
+    pointed at. Lesson 01 has been amended.</p>
+  </div>
+
+  <h3>Elsewhere in this workspace</h3>
+  <ul>
+    <li><a href="../reference/online-softmax.html">Reference · Online softmax</a> — the recurrence, the invariant and the failure modes, on one printable page</li>
+    <li><a href="../reference/block-skipping-arithmetic.html">Reference · Block-skipping arithmetic</a> — which tiles this pass is walking in the first place</li>
+    <li><a href="0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a work map</a></li>
+    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
+    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+  </ul>
+
+  <h3>Where this goes</h3>
+  <p>
+    You can now state what a flash kernel holds in registers between tiles: three things
+    per query row — <code>m</code>, <code>ℓ</code>, <code>O</code>. Lesson 03 asks the
+    question that has been deferred twice now: <b>what actually moves that data</b>. Pallas
+    grids and <code>BlockSpec</code>s — what gets DMA'd, when, and who decides. That is
+    the Phase 2 warm-up, and per
+    <a href="../docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a>
+    it comes before <code>index_map</code>, not after.
+  </p>
+
+  <div class="ask">
+    <b>Ask your teacher.</b> Good questions from this one: why divide only at the end
+    rather than per tile; what happens to <code>m</code> and <code>ℓ</code> when a tile is
+    entirely masked out (a real edge case in lesson 01's <i>partial</i> tiles); and whether
+    the backward pass can reuse any of this. Come back and ask.
+  </div>
+
+</footer>
+
+<script src="../assets/softmax-stream.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+SoftmaxStream.mount('#sim', {
+  title: 'One pass, one tile at a time',
+  preset: 'gentle', tile: 2, mode: 'running-max', precision: 'float32',
+  controls: ['preset', 'tile', 'mode', 'precision']
+});
+
+Quiz.mount('#quiz', {
+  title: 'Retrieval practice',
+  questions: [
+    {
+      stem: 'After tile 0, <code>m = 3</code>. Tile 1 has rowmax 7. What multiplies <code>ℓ</code> before the new tile is added?',
+      options: ['exp(3 − 7)', 'exp(7 − 3)', 'exp(7 ÷ 3)', 'exp(3 + 7)'],
+      answer: 0,
+      why: 'α = e<sup>m<sub>old</sub>−m<sub>new</sub></sup> = e<sup>3−7</sup> ≈ 0.0183. The old max leaves every term and the new one replaces it. Note the sign: old minus new, so the exponent is negative and α &lt; 1. Getting this backwards gives α ≈ 54.6, which inflates the accumulator instead of rebasing it.'
+    },
+    {
+      stem: 'You freeze <code>m</code> at tile 0’s rowmax and never update it. What do you still have, and what do you lose?',
+      options: ['bounded exponents, hence range',
+                'bounded rounding, hence accuracy',
+                'bounded traffic, hence bandwidth',
+                'bounded rescales, hence speed'],
+      answer: 0,
+      why: 'You lose exactly this and nothing else. The recurrence stays algebraically exact with a frozen m — the invariant in §3 still holds — but a later score above m produces a positive exponent, and float32 gives out at 88.72. The running max is what makes every exponent ≤ 0 by construction. Run the widget on <i>freeze m at tile 0</i> with the <i>spike</i> preset and watch precisely that happen.'
+    },
+    {
+      stem: 'Over a whole pass, the rescale factor <code>α</code> is always…',
+      options: ['in the interval (0, 1]',
+                'in the interval [1, ∞)',
+                'in the interval (0, ∞)',
+                'in the interval [0, 1)'],
+      answer: 0,
+      why: 'The running max is non-decreasing, so m<sub>j−1</sub> − m<sub>j</sub> ≤ 0 and α = e<sup>≤0</sup> ∈ (0, 1]. It hits 1 exactly when the max did not move — the common case once the row has seen its largest score. It never exceeds 1, which is why repeated rescaling cannot amplify accumulated error.'
+    },
+    {
+      stem: 'The running max increases at tile <code>j</code>. Which accumulators must be rescaled by <code>α</code>?',
+      options: ['both ℓ and output O',
+                'only ℓ, not output O',
+                'only output O, not ℓ',
+                'neither ℓ nor output O'],
+      answer: 0,
+      why: 'Both. O accumulated e<sup>S−m<sub>old</sub></sup>V under the old max exactly as ℓ accumulated e<sup>S−m<sub>old</sub></sup>, so both are rebased by the same scalar. Rescaling only ℓ is the classic bug: the denominator becomes right, the numerator stays stale, and the output is wrong by a factor that varies per row — which makes it look like a subtle precision issue rather than the sign-and-scalar error it is.'
+    },
+    {
+      stem: 'Interleaved with lesson 01: a local layer, <code>W = 512</code>, <code>B = 256</code>. How many rescales does one query row’s pass perform?',
+      options: ['two rescales per row',
+                'one rescale per row',
+                'four rescales per row',
+                'six rescales per row'],
+      answer: 0,
+      why: 'Lesson 01: live tiles per row = W/B + 1 = 3 once the row clears the start of the sequence. The first tile initialises m and ℓ from nothing — formally α<sub>1</sub> = e<sup>−∞−m</sup> = 0 against ℓ<sub>0</sub> = 0, so a kernel just special-cases it — leaving 3 − 1 = 2 real rescales. The two lessons compose: block skipping decides how many tiles the pass visits, and the pass costs one rescale per tile after the first.'
+    }
+  ]
+});
+</script>
+
+</body>
+</html>

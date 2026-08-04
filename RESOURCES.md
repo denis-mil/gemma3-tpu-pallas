@@ -20,10 +20,22 @@ parametric recall.
 
 ### Attention algorithms
 
+- [Online normalizer calculation for softmax (arXiv:1805.02867)](https://arxiv.org/abs/1805.02867)
+  — Milakov & Gimelshein, NVIDIA, 2018. **The origin of the online-softmax recurrence**,
+  four pages, with an induction proof. Algorithm 2 is safe softmax (three passes);
+  Algorithm 3 is the single-pass version,
+  `d_j ← d_{j−1}·e^{m_{j−1}−m_j} + e^{x_j−m_j}`. Use for: the recurrence itself, and the
+  invariant that makes it testable. Prefer it over FlashAttention for *why the recurrence
+  is correct*; FlashAttention inherits it without re-deriving it.
 - [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness
   (arXiv:2205.14135)](https://arxiv.org/abs/2205.14135) — Dao, Fu, Ermon, Rudra, Ré.
-  Use for: tiling, the online-softmax recurrence, and the IO-complexity argument that
-  justifies the whole approach. Read §3.1 before Phase 3.
+  **Section map, verified against the ar5iv HTML** — the numbering is easy to get
+  backwards:
+  - §3.1 "An Efficient Attention Algorithm With Tiling and Recomputation" — tiling *and*
+    the online-softmax recurrence (Algorithm 1, with `m` and `ℓ`). Lesson 02's reading.
+  - §3.2 "Analysis: IO Complexity of FlashAttention" — the memory-traffic argument,
+    Theorem 2. Lesson 01's reading.
+  - §3.3 "Extension: Block-Sparse FlashAttention" — the block-skipping payoff. Phase 5.
 - [`splash_attention_kernel.py`](https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/splash_attention/splash_attention_kernel.py)
   The ceiling. Use for: how block skipping is *actually* expressed on TPU — read its
   mask-processing code when Phase 5 starts, not before.

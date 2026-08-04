@@ -192,11 +192,12 @@
   <h3>Read this next</h3>
   <p>
     <a href="https://arxiv.org/abs/2205.14135">FlashAttention: Fast and Memory-Efficient
-    Exact Attention with IO-Awareness</a> (Dao, Fu, Ermon, Rudra &amp; Ré, 2022) — <b>§3.1
-    only</b>, about four pages. Read it for one idea: attention's cost is measured in
-    memory traffic, not FLOPs. You have just spent a lesson counting which tiles get
-    loaded; §3.1 is the argument for why that was the right thing to count. Skip §3.2's
-    online-softmax recurrence — that is next lesson's job.
+    Exact Attention with IO-Awareness</a> (Dao, Fu, Ermon, Rudra &amp; Ré, 2022) — <b>§3.2
+    only</b>, "Analysis: IO Complexity of FlashAttention". Read it for one idea:
+    attention's cost is measured in memory traffic, not FLOPs. You have just spent a
+    lesson counting which tiles get loaded; §3.2 is the argument for why that was the
+    right thing to count. Leave §3.1's tiling and online-softmax recurrence for
+    <a href="0002-the-normaliser-you-dont-have-yet.html">lesson 02</a>.
   </p>
 
   <h3>Elsewhere in this workspace</h3>
@@ -209,7 +210,8 @@
 
   <h3>Where this goes</h3>
   <p>
-    Lesson 02 takes the tiles you just learned to keep and asks the obvious next question:
+    <a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02</a> takes the tiles you
+    just learned to keep and asks the obvious next question:
     if you only ever hold one tile of scores at a time, how do you compute a softmax whose
     denominator depends on all of them? That is online softmax, and it is the last
     unfamiliar thing standing between you and Phase 3.

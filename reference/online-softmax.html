@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference · Online softmax</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Reference sheet</p>
+  <h1>Online softmax</h1>
+  <p class="standfirst">
+    Computing an exact softmax in one pass, holding one tile of scores at a time —
+    the recurrence, the invariant that tests it, and the four ways it goes wrong.
+  </p>
+
+  <h2>The recurrence</h2>
+
+  <p>
+    Per query row. Tiles of scores <code>S<sub>1</sub> … S<sub>T</sub></code> with matching
+    value tiles <code>V<sub>j</sub></code>. State is three things:
+    <code>m</code> scalar, <code>ℓ</code> scalar, <code>O</code> vector of
+    <code>head_dim</code>.
+  </p>
+
+  <div class="eq">
+    <b>init</b> &nbsp; m<sub>0</sub> = −∞ &nbsp;·&nbsp; ℓ<sub>0</sub> = 0 &nbsp;·&nbsp; O<sub>0</sub> = 0<br><br>
+    m<sub>j</sub> = max(m<sub>j−1</sub>, rowmax S<sub>j</sub>)<br>
+    α<sub>j</sub> = e<sup>m<sub>j−1</sub> − m<sub>j</sub></sup> &nbsp; <i>(old minus new)</i><br>
+    P<sub>j</sub> = e<sup>S<sub>j</sub> − m<sub>j</sub></sup><br>
+    ℓ<sub>j</sub> = α<sub>j</sub>·ℓ<sub>j−1</sub> + rowsum P<sub>j</sub><br>
+    O<sub>j</sub> = α<sub>j</sub>·O<sub>j−1</sub> + P<sub>j</sub> V<sub>j</sub><br><br>
+    <b>finalise</b> &nbsp; answer = O<sub>T</sub> / ℓ<sub>T</sub> &nbsp; <i>(divide once, at the end)</i>
+  </div>
+
+  <p>
+    Source: <a href="https://arxiv.org/abs/1805.02867">Milakov &amp; Gimelshein 2018</a>,
+    Algorithm 3 (the <code>ℓ</code> half, proved by induction);
+    <a href="https://arxiv.org/abs/2205.14135">FlashAttention</a> §3.1 Algorithm 1 (the
+    same recurrence with <code>O</code> attached).
+  </p>
+
+  <h2>The invariant</h2>
+
+  <div class="eq">
+    ℓ<sub>j</sub> = Σ<sub>seen</sub> e<sup>s − m<sub>j</sub></sup>
+    &nbsp;·&nbsp;
+    O<sub>j</sub> = Σ<sub>seen</sub> e<sup>s − m<sub>j</sub></sup> v
+    &nbsp;·&nbsp;
+    O<sub>j</sub>/ℓ<sub>j</sub> = exact attention over tiles 1…j
+  </div>
+
+  <p>
+    Every intermediate state is a <i>finished</i> answer to a smaller problem, not a
+    partial one. Assert this per tile in interpret mode — it localises a bug to the tile
+    that caused it instead of to the final output.
+  </p>
+
+  <h2>Why the running max</h2>
+
+  <table>
+    <tr><th>Property</th><th>Comes from</th><th>What it buys</th></tr>
+    <tr><td>exactness</td><td>the algebra alone</td>
+        <td>nothing to do with the max — <code>e<sup>a−b</sup></code> distributes over a
+        sum for <b>any</b> sequence <code>m<sub>j</sub></code></td></tr>
+    <tr class="highlight"><td><i>running</i></td><td>the single pass</td>
+        <td>the global max is not available; whatever you subtract must be computable
+        from tiles already seen</td></tr>
+    <tr class="highlight"><td><i>max</i></td><td>floating point</td>
+        <td>every exponent <code>≤ 0</code> ⇒ every term in <code>(0, 1]</code> ⇒
+        overflow impossible by construction</td></tr>
+    <tr><td><code>α ≤ 1</code></td><td><code>m</code> non-decreasing</td>
+        <td>the rescale only ever shrinks; a factor above 1 would amplify accumulated
+        error once per tile</td></tr>
+  </table>
+
+  <p>
+    Stated as one line: <b>"running" comes from the algorithm, "max" comes from the
+    hardware.</b> Freezing <code>m</code> keeps the answer exact and destroys the range.
+  </p>
+
+  <h2>Exponent ceilings</h2>
+
+  <p><code>exp(x)</code> overflows above <code>ln(max)</code>:</p>
+
+  <table>
+    <tr><th>Format</th><th class="num">max</th><th class="num">ln(max)</th><th class="num">mantissa bits</th></tr>
+    <tr class="highlight"><td>float32</td><td class="num">3.4028×10<sup>38</sup></td><td class="num">88.72</td><td class="num">23</td></tr>
+    <tr><td>bfloat16</td><td class="num">3.3895×10<sup>38</sup></td><td class="num">88.72</td><td class="num">7</td></tr>
+    <tr><td>float16</td><td class="num">65504</td><td class="num">11.09</td><td class="num">10</td></tr>
+  </table>
+
+  <p class="sidenote">
+    Verified with <code>ml_dtypes</code>. bf16 trades mantissa for float32's exponent
+    range, so the overflow ceiling is the same — which is why bf16 is the accelerator
+    format and fp16 is not. Accumulate <code>m</code>, <code>ℓ</code>, <code>O</code> in
+    float32 regardless.
+  </p>
+
+  <h2>Traps</h2>
+
+  <div class="warn">
+    <span class="note-label">Trap 1 · rescaling ℓ but not O</span>
+    <p>Both accumulated under the old max; both take the same <code>α</code>. Rescale only
+    <code>ℓ</code> and the denominator is right while the numerator is stale — the output
+    is wrong by a per-row factor, which reads like a precision problem and is not.</p>
+  </div>
+
+  <div class="warn">
+    <span class="note-label">Trap 2 · the sign of α</span>
+    <p><code>α = e<sup>m<sub>old</sub> − m<sub>new</sub></sup></code>. Old minus new, so
+    the exponent is <code>≤ 0</code>. Inverting it gives a factor <code>≥ 1</code> that
+    inflates the accumulator every time the max moves. Derive the direction from
+    <code>m</code> being non-decreasing rather than memorising it.</p>
+  </div>
+
+  <div class="warn">
+    <span class="note-label">Trap 3 · a fully-masked tile poisons the row</span>
+    <p>If every score in a tile is <code>−∞</code> and <code>m</code> is still
+    <code>−∞</code>, then <code>α = e<sup>−∞ − (−∞)</sup> = e<sup>NaN</sup> = NaN</code>,
+    and NaN propagates through the rest of the row. <b>Verified reachable in this
+    project:</b> at <code>N = 512</code>, <code>W = 256</code>, <code>B = 256</code>, the
+    tile <code>q ∈ [256,511] × k ∈ [0,255]</code> is <i>partial</i> — but query row
+    <b>511</b> has zero allowed keys in it, and that is the first key tile it visits.
+    Checked against <code>reference.attention_mask(512, 512, window=256)</code>.</p>
+    <p>Fix: guard the first step (<code>α := 0</code> when
+    <code>m<sub>j−1</sub> = −∞</code>), or skip tiles that are dead <i>for this query
+    row</i> and not merely for the tile as a whole. Block skipping alone does not save
+    you — this tile is live.</p>
+  </div>
+
+  <div class="warn">
+    <span class="note-label">Trap 4 · dividing per tile</span>
+    <p><code>O</code> is unnormalised until the pass ends. Divide once, after the last
+    tile. Dividing per tile means re-multiplying to undo it, and loses bits each time.</p>
+  </div>
+
+  <h2>Kernel state, per query row</h2>
+
+  <table>
+    <tr><th>Held</th><th>Shape</th><th>Rescaled when m moves?</th></tr>
+    <tr><td><code>m</code> running max</td><td class="num">scalar</td><td>no — it <i>is</i> the new max</td></tr>
+    <tr><td><code>ℓ</code> normaliser</td><td class="num">scalar</td><td>yes, ×α</td></tr>
+    <tr><td><code>O</code> unnormalised out</td><td class="num">head_dim = 256</td><td>yes, ×α</td></tr>
+  </table>
+
+  <p>
+    Rescaling <code>O</code> is a scalar–vector multiply, not a matmul — that is what
+    makes the scheme affordable. For a block of <code>B<sub>q</sub></code> query rows,
+    <code>m</code> and <code>ℓ</code> are vectors of length <code>B<sub>q</sub></code> and
+    <code>O</code> is <code>B<sub>q</sub> × head_dim</code>; every operation above is
+    row-wise.
+  </p>
+
+  <h2>Cost per tile</h2>
+
+  <div class="eq">
+    1 rowmax &nbsp;·&nbsp; 1 exp over the tile &nbsp;·&nbsp; 1 rowsum &nbsp;·&nbsp;
+    2 scalar rescales &nbsp;·&nbsp; 1 PV matmul
+  </div>
+
+  <p>
+    A row visiting <code>n</code> live tiles pays <code>n − 1</code> real rescales — the
+    first tile initialises from nothing. Live tiles per row come from
+    <a href="block-skipping-arithmetic.html">block-skipping arithmetic</a>:
+    <code>W/B + 1</code> for a local layer, so <code>W/B</code> rescales.
+  </p>
+
+</article>
+
+<footer class="footer">
+  <p>
+    From <a href="../lessons/0002-the-normaliser-you-dont-have-yet.html">Lesson 02 · The
+    normaliser you don't have yet</a>. Vocabulary per
+    <a href="../CONTEXT.md">CONTEXT.md</a>. Companion sheet:
+    <a href="block-skipping-arithmetic.html">Block-skipping arithmetic</a>.
+  </p>
+</footer>
+
+</body>
+</html>
