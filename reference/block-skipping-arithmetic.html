@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference · Block-skipping arithmetic</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Reference sheet</p>
+  <h1>Block-skipping arithmetic</h1>
+  <p class="standfirst">
+    Everything needed to decide, at trace time, which tiles a windowed attention kernel
+    must load — and how much it costs to get the block size wrong.
+  </p>
+
+  <h2>Mask conventions</h2>
+
+  <p>
+    As implemented in <a href="../src/gemma3_pallas/reference.py">reference.py</a>.
+    Query <code>q</code>, key <code>k</code>, window <code>W</code>:
+  </p>
+
+  <div class="eq">
+    causal &nbsp; k ≤ q &nbsp;&nbsp;·&nbsp;&nbsp; windowed &nbsp; k &gt; q − W
+  </div>
+
+  <p>
+    So query <code>q</code> sees keys <code>[q−W+1, q]</code> — <b><code>W</code> keys
+    including itself</b>, not <code>W+1</code>. A global layer is the same formula with
+    <code>W = ∞</code>. Decode adds <code>offset</code> to <code>q</code>; nothing else
+    changes.
+  </p>
+
+  <h2>The tile predicate</h2>
+
+  <p>
+    Tile spans queries <code>[q<sub>lo</sub>, q<sub>hi</sub>]</code>, keys
+    <code>[k<sub>lo</sub>, k<sub>hi</sub>]</code>. Two integer comparisons, no loop:
+  </p>
+
+  <div class="eq">
+    <b>live</b> ⟺ q<sub>hi</sub> ≥ k<sub>lo</sub> &nbsp;and&nbsp; q<sub>lo</sub> − k<sub>hi</sub> ≤ W − 1<br>
+    <b>full</b> ⟺ k<sub>hi</sub> ≤ q<sub>lo</sub> &nbsp;and&nbsp; q<sub>hi</sub> − k<sub>lo</sub> ≤ W − 1<br>
+    <b>partial</b> ⟺ live and not full &nbsp;·&nbsp; <b>dead</b> ⟺ not live
+  </div>
+
+  <table>
+    <tr><th>State</th><th>DMA the tile?</th><th>Apply elementwise mask?</th></tr>
+    <tr><td>dead</td><td>no — this is block skipping</td><td>—</td></tr>
+    <tr><td>partial</td><td>yes</td><td>yes</td></tr>
+    <tr><td>full</td><td>yes</td><td>no — skip it</td></tr>
+  </table>
+
+  <p><b>Why it is only two comparisons.</b> Over the tile, the diagonal
+  <code>d = q − k</code> sweeps the contiguous interval
+  <code>[q<sub>lo</sub>−k<sub>hi</sub>, q<sub>hi</sub>−k<sub>lo</sub>]</code>. The mask is
+  the band <code>0 ≤ d ≤ W−1</code>. Two intervals intersect iff neither ends before the
+  other begins.</p>
+
+  <div class="warn">
+    <span class="note-label">Verified</span>
+    <p>Checked exhaustively against <code>reference.attention_mask()</code>:
+    16,464 tiles, <code>N ∈ {512, 1024, 2048}</code> × <code>W ∈ {128, 256, 512, ∞}</code>
+    × block sizes <code>{64, 128, 256}</code>. Zero mismatches.</p>
+  </div>
+
+  <h2>Counting formulas</h2>
+
+  <p>Square blocks of size <code>B</code>, with <code>B | N</code> and <code>B | W</code>.
+  Let <code>R = N/B</code> rows and <code>m = W/B + 1</code> live tiles per unclipped row.</p>
+
+  <table>
+    <tr><th>Quantity</th><th>Local (window W)</th><th>Global</th></tr>
+    <tr><td>pairs kept</td><td><code>N·W − W(W−1)/2</code></td><td><code>N(N+1)/2</code></td></tr>
+    <tr><td>live tiles</td><td><code>R·m − m(m−1)/2</code></td><td><code>R(R+1)/2</code></td></tr>
+    <tr><td>total tiles</td><td><code>R²</code></td><td><code>R²</code></td></tr>
+    <tr><td>live per row</td><td><code>m</code>, clipped near <code>q = 0</code></td><td><code>i+1</code> at row <code>i</code></td></tr>
+  </table>
+
+  <p class="sidenote">
+    The subtracted triangle in both live-tile formulas is the clipping at the start of the
+    sequence, where a query row has fewer than <code>m</code> blocks behind it.
+  </p>
+
+  <h2>Gemma 3 1B, N = 32768, W = 512</h2>
+
+  <table>
+    <tr><th class="num">B</th><th class="num">Grid</th><th class="num">Live</th><th class="num">Live/row</th><th class="num">Loaded</th><th class="num">vs pairs</th></tr>
+    <tr><td class="num">512</td><td class="num">64²</td><td class="num">127</td><td class="num">1.98</td><td class="num">3.10%</td><td class="num">2.00×</td></tr>
+    <tr><td class="num">256</td><td class="num">128²</td><td class="num">381</td><td class="num">2.98</td><td class="num">2.33%</td><td class="num">1.50×</td></tr>
+    <tr><td class="num">128</td><td class="num">256²</td><td class="num">1,270</td><td class="num">4.96</td><td class="num">1.94%</td><td class="num">1.25×</td></tr>
+    <tr class="highlight"><td class="num">—</td><td class="num">pair-level bound</td><td class="num">—</td><td class="num">—</td><td class="num">1.55%</td><td class="num">1.00×</td></tr>
+  </table>
+
+  <p>
+    Overhead is <code>m/(W/B) = 1 + B/W</code>. Halving <code>B</code> halves the excess
+    but quadruples the grid. <code>B = 128</code> is the v5e MXU dimension — below it,
+    tiles no longer fill a matmul.
+  </p>
+
+  <h2>Which denominator</h2>
+
+  <table>
+    <tr><th>Compared against</th><th class="num">Ratio at 32K</th><th>Use when</th></tr>
+    <tr class="highlight"><td>N² — dense scores</td><td class="num">1.55% · 64×</td><td>quoting against the naive baseline</td></tr>
+    <tr><td>N²/2 — causal only</td><td class="num">3.10% · 32×</td><td>isolating what <i>windowing</i> contributes</td></tr>
+  </table>
+
+  <p>
+    Half of the headline 64× is causality, which every attention kernel already exploits.
+    Both numbers are honest; state which one you mean.
+  </p>
+
+  <h2>Layer constants</h2>
+
+  <table>
+    <tr><th>Quantity</th><th class="num">Value</th></tr>
+    <tr><td>layers</td><td class="num">26</td></tr>
+    <tr><td>local layers</td><td class="num">22</td></tr>
+    <tr><td>global layers</td><td class="num">4 — at 5, 11, 17, 23</td></tr>
+    <tr><td><code>sliding_window</code></td><td class="num">512</td></tr>
+    <tr><td><code>sliding_window_pattern</code></td><td class="num">6</td></tr>
+    <tr><td>query heads / KV heads</td><td class="num">4 / 1 (MQA)</td></tr>
+    <tr><td><code>head_dim</code></td><td class="num">256</td></tr>
+    <tr><td>max context</td><td class="num">32768</td></tr>
+  </table>
+
+  <p>
+    Layer <code>i</code> is global iff <code>(i+1) % 6 == 0</code>. Source:
+    <a href="https://huggingface.co/google/gemma-3-1b-it/blob/main/config.json"><code>gemma-3-1b-it/config.json</code></a>,
+    mirrored in <a href="../src/gemma3_pallas/shapes.py">shapes.py</a>.
+  </p>
+
+  <div class="note">
+    <span class="note-label">Trap</span>
+    <p>The <a href="https://arxiv.org/abs/2503.19786">Gemma 3 technical report</a> says the
+    sliding window was reduced "from 4096 to 1024". That describes the larger models. The
+    <b>1B ships <code>sliding_window: 512</code></b>. For per-model numbers, the config is
+    the authority, not the paper.</p>
+  </div>
+
+  <h2>Cost of a pair</h2>
+
+  <div class="eq">
+    FLOPs = 4 · pairs · head_dim · num_heads
+  </div>
+
+  <p>
+    Two matmuls per pair — <code>QK<sup>T</sup></code> and <b>PV</b> (the post-softmax
+    probabilities times <code>V</code>) — at <code>2·D</code> FLOPs each. Matches
+    <code>attention_flops()</code> in <a href="../src/gemma3_pallas/shapes.py">shapes.py</a>.
+  </p>
+
+</article>
+
+<footer class="footer">
+  <p>
+    From <a href="../lessons/0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a
+    work map</a>. Vocabulary per <a href="../CONTEXT.md">CONTEXT.md</a>.
+  </p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 01 · The mask is a work map</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Lesson 01 · Windowed prefill</p>
+  <h1>The mask is a work map</h1>
+  <p class="standfirst">
+    A mask tells you which scores to throw away. Read it one tile at a time and it
+    tells you something far more useful: which memory you never had to load.
+  </p>
+
+  <p>
+    Your <a href="../README.md">README</a> makes a claim: at a 32K prompt, a local layer
+    computes about 64× more score pairs than it keeps. That number is correct, and by the
+    end of this lesson you will be able to derive it — but deriving it is not the skill.
+    The skill is the step after it, because <b>a kernel cannot skip a pair. It can only
+    skip a tile.</b>
+  </p>
+
+  <p>
+    That gap between <i>pairs you don't need</i> and <i>tiles you can refuse to load</i> is
+    where the entire Phase 5 kernel lives. Today you learn to compute it exactly.
+  </p>
+
+  <div class="note">
+    <span class="note-label">Vocabulary check</span>
+    <p><b>PV</b> is simply attention's second matmul: the probabilities after softmax,
+    multiplied by <code>V</code>. Attention is two matmuls with a softmax between them —
+    <code>QK<sup>T</sup></code> produces the scores, PV consumes them. Both are per query
+    head, both cost <code>2·N·S·D</code> FLOPs, which is why
+    <a href="../src/gemma3_pallas/shapes.py">shapes.py</a> charges
+    <code>4·pairs·head_dim</code> for the pair — a 2 for each matmul.</p>
+  </div>
+
+  <h2>1 · Which 64×?</h2>
+
+  <p>
+    A local layer at window <code>W = 512</code> lets query <code>q</code> attend to keys
+    in <code>[q−W+1, q]</code>. So the number of pairs it <i>keeps</i> is
+    <code>Σ min(q+1, W)</code>, which for <code>N ≫ W</code> is very nearly
+    <code>N·W</code>. The question is what you divide that by — and there are two honest
+    answers.
+  </p>
+
+  <p class="sidenote">
+    Both rows are verified arithmetic, not estimates: at <code>N = 32768</code>,
+    <code>W = 512</code>, exactly 16,646,400 pairs are kept.
+  </p>
+
+  <div class="scroll-x">
+  <table>
+    <tr><th>Denominator</th><th class="num">Pairs</th><th class="num">Kept</th><th>Meaning</th></tr>
+    <tr class="highlight">
+      <td>N² — dense scores</td><td class="num">1,073,741,824</td><td class="num">1.55%</td>
+      <td>what the naive baseline actually computes</td>
+    </tr>
+    <tr>
+      <td>N²/2 — causal only</td><td class="num">536,887,296</td><td class="num">3.10%</td>
+      <td>what a causal-but-unwindowed kernel computes</td>
+    </tr>
+  </table>
+  </div>
+
+  <p>
+    The README's 64× is the first row, and it is the right one to quote, because
+    <a href="../CONTEXT.md">the naive baseline</a> is defined as materialising the full
+    score matrix and <i>then</i> masking. But notice what just happened: half of that 64×
+    is causality, which every attention kernel already exploits. <b>Windowing's own
+    contribution is 32×, not 64×.</b> Quote the number, but know which part of it your
+    kernel is being credited for.
+  </p>
+
+  <h2>2 · Tiles, not pairs</h2>
+
+  <p>
+    A Pallas kernel walks a grid. Each grid step handles one block of queries against one
+    block of keys — a <b>tile</b>. The kernel's only real decision is: <i>for this tile, do
+    I issue the DMA or not?</i> So classify every tile into three states:
+  </p>
+
+  <ul>
+    <li><b>dead</b> — the mask forbids every pair in it. Never load it. This is
+      <a href="../CONTEXT.md">block skipping</a>.</li>
+    <li><b>partial</b> — some pairs allowed, some not. Load it, then apply an elementwise
+      mask, exactly as the naive baseline would.</li>
+    <li><b>full</b> — every pair allowed. Load it and skip the masking entirely.</li>
+  </ul>
+
+  <p>
+    Take a tile covering queries <code>[q<sub>lo</sub>, q<sub>hi</sub>]</code> against keys
+    <code>[k<sub>lo</sub>, k<sub>hi</sub>]</code>. Every pair in it has a diagonal offset
+    <code>d = q − k</code>, and as <code>q</code> and <code>k</code> range over the tile,
+    <code>d</code> sweeps a <i>contiguous</i> interval
+    <code>[q<sub>lo</sub>−k<sub>hi</sub>, q<sub>hi</sub>−k<sub>lo</sub>]</code>. The mask
+    is itself just a band, <code>0 ≤ d ≤ W−1</code>. Two intervals overlap iff neither
+    ends before the other starts — which collapses the whole thing to two comparisons:
+  </p>
+
+  <p class="eq">
+    live &nbsp;⟺&nbsp; q<sub>hi</sub> ≥ k<sub>lo</sub> &nbsp;<b>and</b>&nbsp; q<sub>lo</sub> − k<sub>hi</sub> ≤ W − 1<br>
+    full &nbsp;⟺&nbsp; k<sub>hi</sub> ≤ q<sub>lo</sub> &nbsp;<b>and</b>&nbsp; q<sub>hi</sub> − k<sub>lo</sub> ≤ W − 1
+  </p>
+
+  <p class="sidenote">
+    First comparison is causality; second is the window. A global layer is the same
+    predicate with <code>W = ∞</code> — one clause simply never fires. Local and global
+    are not two kernels.
+  </p>
+
+  <p>
+    That is the whole thing. No loop over positions, no materialised mask — two integer
+    comparisons per tile, evaluable at trace time, which is precisely why it can become an
+    <code>index_map</code> in Phase 5 instead of a runtime branch.
+  </p>
+
+  <div class="warn">
+    <span class="note-label">Verified, not asserted</span>
+    <p>This predicate was checked exhaustively against
+    <code>reference.attention_mask()</code> in
+    <a href="../src/gemma3_pallas/reference.py">reference.py</a> — 16,464 tiles across
+    every combination of <code>N ∈ {512, 1024, 2048}</code>,
+    <code>W ∈ {128, 256, 512, ∞}</code> and block sizes <code>{64, 128, 256}</code>.
+    Zero mismatches.</p>
+  </div>
+
+  <h2>3 · See it</h2>
+
+  <p>
+    Queries run down, keys run across. Start at <code>seq_len 2048</code>, local,
+    <code>block 256</code> — then switch the layer to global and watch which of the two
+    clauses you just lost.
+  </p>
+
+  <div id="grid"></div>
+
+  <h2>4 · The block size is not free</h2>
+
+  <p>
+    Here is the payoff, and it is the part that surprises people. The band has a fixed
+    width, but tiles are square — so a query row's live tiles number about
+    <code>W/B + 1</code>, and that <code>+1</code> is pure overhead. Smaller blocks track
+    the band more tightly:
+  </p>
+
+  <div class="scroll-x">
+  <table>
+    <tr><th class="num">Block</th><th class="num">Grid</th><th class="num">Live tiles</th><th class="num">Live/row</th><th class="num">Loaded</th><th class="num">Waste</th></tr>
+    <tr><td class="num">512</td><td class="num">64 × 64</td><td class="num">127</td><td class="num">1.98</td><td class="num">3.10%</td><td class="num">2.00×</td></tr>
+    <tr><td class="num">256</td><td class="num">128 × 128</td><td class="num">381</td><td class="num">2.98</td><td class="num">2.33%</td><td class="num">1.50×</td></tr>
+    <tr><td class="num">128</td><td class="num">256 × 256</td><td class="num">1,270</td><td class="num">4.96</td><td class="num">1.94%</td><td class="num">1.25×</td></tr>
+    <tr class="highlight"><td class="num">—</td><td class="num">pair-level</td><td class="num">—</td><td class="num">—</td><td class="num">1.55%</td><td class="num">1.00×</td></tr>
+  </table>
+  </div>
+
+  <p>
+    All at <code>N = 32768</code>, <code>W = 512</code>. Choosing <code>B = W = 512</code>
+    — the obvious, tidy choice — makes your kernel load <b>twice</b> the KV it strictly
+    needs. Choosing <code>B = 128</code> cuts that to 1.25×, but 128 is the
+    <a href="../src/gemma3_pallas/shapes.py">v5e MXU dimension</a>, so tiles stop
+    amortising and the grid grows 16-fold in steps.
+  </p>
+
+  <div class="win">
+    <span class="note-label">The win</span>
+    <p>You now have the number that Phase 5's block size must be argued against. Not
+    "128 felt fast" but "B = 256 loads 1.50× the minimum KV and keeps tiles two MXU passes
+    wide". <b>That is a roofline argument, and you can make it before writing a line of
+    the kernel.</b></p>
+  </div>
+
+  <h2>5 · Retrieve it</h2>
+
+  <p>
+    Work these out rather than recognising them — evaluate the predicate on paper. Getting
+    one wrong is more useful than getting it right by feel.
+  </p>
+
+  <div id="quiz"></div>
+
+</article>
+
+<footer class="footer">
+
+  <h3>Read this next</h3>
+  <p>
+    <a href="https://arxiv.org/abs/2205.14135">FlashAttention: Fast and Memory-Efficient
+    Exact Attention with IO-Awareness</a> (Dao, Fu, Ermon, Rudra &amp; Ré, 2022) — <b>§3.1
+    only</b>, about four pages. Read it for one idea: attention's cost is measured in
+    memory traffic, not FLOPs. You have just spent a lesson counting which tiles get
+    loaded; §3.1 is the argument for why that was the right thing to count. Skip §3.2's
+    online-softmax recurrence — that is next lesson's job.
+  </p>
+
+  <h3>Elsewhere in this workspace</h3>
+  <ul>
+    <li><a href="../reference/block-skipping-arithmetic.html">Reference · Block-skipping arithmetic</a> — the predicate, the counts and the formulas, on one printable page</li>
+    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary: <i>local layer</i>, <i>window</i>, <i>block skipping</i>, <i>naive baseline</i></li>
+    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+    <li><a href="../docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a> — why windowed prefill, and not the other three candidates</li>
+  </ul>
+
+  <h3>Where this goes</h3>
+  <p>
+    Lesson 02 takes the tiles you just learned to keep and asks the obvious next question:
+    if you only ever hold one tile of scores at a time, how do you compute a softmax whose
+    denominator depends on all of them? That is online softmax, and it is the last
+    unfamiliar thing standing between you and Phase 3.
+  </p>
+
+  <div class="ask">
+    <b>Ask your teacher.</b> Anything above that felt hand-waved — why the diagonal
+    interval is contiguous, what a DMA actually costs, why <code>+1</code> and not
+    <code>+2</code> — is a question worth asking rather than filing away. Come back to
+    this conversation and ask; that is what it is for.
+  </div>
+
+</footer>
+
+<script src="../assets/mask-grid.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+MaskGrid.mount('#grid', {
+  title: 'Tile map — queries down, keys across',
+  seqLen: 2048, window: 512, block: 256,
+  controls: ['seqLen', 'window', 'block']
+});
+
+Quiz.mount('#quiz', {
+  title: 'Retrieval practice',
+  questions: [
+    {
+      stem: 'At <code>seq_len 2048</code>, <code>W = 512</code>, <code>B = 256</code> — an 8 × 8 grid — how many tiles are live?',
+      options: ['19 tiles', '21 tiles', '24 tiles', '27 tiles'],
+      answer: 1,
+      why: 'Rows 2–7 have three live tiles each (18); row 0 has one and row 1 has two, clipped by the start of the sequence. 18 + 3 = 21. The clipping is why live/row reads 2.63 rather than a clean W/B + 1 = 3.'
+    },
+    {
+      stem: 'After loading, which tiles still need an elementwise mask applied?',
+      options: ['tiles on the causal edge only',
+                'tiles at the window edge only',
+                'tiles at either edge of band',
+                'tiles the kernel loads at all'],
+      answer: 2,
+      why: 'A partial tile is one straddling <i>either</i> boundary — the causal diagonal at the top-right of the band, or the window cut-off at the bottom-left. Tiles strictly between them are full, and masking them is wasted work. That is the second half of the predicate earning its keep.'
+    },
+    {
+      stem: 'At <code>seq_len 32768</code>, halving the block from 512 to 256 makes the live-tile fraction…',
+      options: ['fall from 3.10% to 2.33%',
+                'fall from 3.10% to 1.55%',
+                'hold at 3.10% either way',
+                'rise from 3.10% to 4.65%'],
+      answer: 0,
+      why: 'Live tiles per row goes from ~2 to ~3, but the row is now twice as long, so the fraction falls as (W/B + 1)/(N/B) — approaching but never reaching the 1.55% pair-level bound. Smaller blocks track the band more tightly; they never beat it.'
+    },
+    {
+      stem: 'Same grid, but a <i>global</i> layer (64 × 64 tiles, <code>W = ∞</code>). What fraction is live?',
+      options: ['50.8% of tiles are live',
+                '100.0% of tiles are live',
+                '25.4% of tiles are live',
+                '3.10% of tiles are live'],
+      answer: 0,
+      why: 'With W = ∞ the window clause never fires, but causality still does: row i has i + 1 live tiles, so 64·65/2 = 2080 of 4096 = 50.8%. Global layers are not unskippable — they are 2× skippable. Gemma 3 1B has four of them, at layers 5, 11, 17 and 23.'
+    }
+  ]
+});
+</script>
+
+</body>
+</html>
