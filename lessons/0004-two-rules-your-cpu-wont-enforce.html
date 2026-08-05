@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 04 · Two rules your CPU won't enforce</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Lesson 04 · Windowed prefill</p>
+  <h1>Two rules your CPU won't enforce</h1>
+  <p class="standfirst">
+    <a href="0003-which-axis-goes-last.html">Lesson 03</a> took <code>(8, 128)</code> on
+    faith and never asked whether the blocks fit. Both debts come due here — and both are
+    checks that your only available machine will silently decline to make.
+  </p>
+
+  <p>
+    You now know how to decide <i>which</i> tiles are worth loading, <i>what</i> to do with
+    one when it lands, and <i>which grid axis</i> keeps an operand resident. All three are
+    decisions about the block. None of them says how big the block may be.
+  </p>
+
+  <p>
+    Two constraints answer that, and they have nothing in common except their failure mode:
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Constraint</th><th>Bites at</th><th>On CPU</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>the <code>(8, 128)</code> shape rule</td><td>Mosaic compile time</td><td>not checked</td></tr>
+      <tr><td>the VMEM budget</td><td>Mosaic compile time</td><td>not checked</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    That third column is why this is one lesson and not two. Your workflow is
+    <a href="../MISSION.md">develop on CPU under interpret mode, validate on scarce Colab
+    TPU time</a>. Both of these rules are invisible from the first half of it, so both have
+    to be applied by hand, at authoring time, by you. What follows is how.
+  </p>
+
+  <h2>1 · Rule one: eight and one hundred and twenty-eight</h2>
+
+  <blockquote>
+    On TPU, only blocks with rank at least 1 are supported. Furthermore, <b>the last two
+    dimensions of your block shape must be equal to the respective dimension of the overall
+    array, or be divisible by 8 and 128 respectively.</b> For blocks of rank 1, the block
+    dimension must be equal to the array dimension, or be a multiple of 1024, or be a power
+    of 2 and at least <code>128 * (32 / bitwidth(dtype))</code>.
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/grid_blockspec.html#blockspec-a-k-a-how-to-chunk-up-inputs">Grids and BlockSpecs</a></cite>
+  </blockquote>
+
+  <p>
+    Two things about that sentence before we use it. It is a <b>disjunction</b> — a block
+    dimension may satisfy the rule by being divisible, <i>or</i> by simply being the whole
+    array along that axis. And it constrains <b>only the last two axes</b>. Leading axes are
+    free.
+  </p>
+
+  <p>The reason is not arbitrary, and the docs give it as hardware, not convention:</p>
+
+  <blockquote>
+    TPUs perform the bulk of the computation on 2D vector registers, which are typically of
+    size 8x128 for 32-bit values… Pallas will only ever consider mapping the last two
+    dimensions of intermediate arrays to the 8x128 vector register dimensions
+    (<b>sublanes</b> and <b>lanes</b> respectively).
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/tpu/details.html#array-layouts">Writing TPU kernels with Pallas · Array Layouts</a></cite>
+  </blockquote>
+
+  <p class="sidenote">
+    Confirmed on this machine rather than taken from the page:
+    <code>get_tpu_info_for_chip(TPU_V5E, 1)</code> reports
+    <code>num_sublanes = 8</code>, <code>num_lanes = 128</code>. The same call is what
+    generates the published
+    <a href="https://docs.jax.dev/en/latest/pallas/tpu/hardware.html">hardware reference
+    table</a>, so the page and the source cannot disagree.
+  </p>
+
+  <p>
+    So <code>8 × 128</code> is the shape of a register. A block whose trailing dimensions do
+    not line up with it is not <i>rejected for tidiness</i> — it cannot be laid into
+    registers without waste. And the waste is quantified:
+  </p>
+
+  <blockquote>
+    all vector computation is padded up to the tile size. Adding a two 1x1 arrays costs as
+    much as adding two 8x128 arrays, and adding two 8x128x1x1 arrays will be <b>1024 times
+    as expensive</b> as adding two 8x128 arrays, since the 8x128x1x1 array will be padded to
+    8x128x8x128.
+    <cite>— same section</cite>
+  </blockquote>
+
+  <div class="win">
+    <span class="note-label">The win</span>
+    <p><b>The lane dimension is 128 whether you use it or not.</b> That single sentence
+    explains a design smell and a design pattern at once. The smell: a trailing dimension of
+    size 1 costs a full tile, so <code>(bq, 1)</code> and <code>(bq, 128)</code> occupy the
+    same registers — one of them is free width you threw away. The pattern: this is why
+    <code>splash_attention</code> broadcasts its rank-1 arrays out to the lane count instead
+    of carrying them narrow. You will see the receipt for that in §6.</p>
+  </div>
+
+  <h2>2 · Apply it by hand, because nothing else will</h2>
+
+  <p>
+    Here is the part that matters for how you work. An illegal block shape runs perfectly
+    well on your laptop:
+  </p>
+
+  <pre><code>block_shape=(3, 7) on a (6, 7) array
+  interpret=True        -> ACCEPTED   shape (6, 7)
+  InterpretParams()     -> ACCEPTED   shape (6, 7)</code></pre>
+
+  <p>
+    <code>3</code> is neither equal to the array's <code>6</code> nor divisible by
+    <code>8</code>, so the second-minor axis is illegal. Both interpreters run it and hand
+    back correct numbers.
+  </p>
+
+  <div class="warn">
+    <span class="note-label">Checked in both modes, deliberately</span>
+    <p>Research 0001 recorded this result under <code>interpret=True</code> only. Session 5
+    found a claim in that same document that was true in one interpreter and false in the
+    other, generalised to "interpret mode" — so this one was re-run in both before being
+    taught. It holds in both, and so does the padding behaviour in §3. <b>The generalisation
+    is safe here. It was not safe last time, and the difference is that somebody
+    checked.</b></p>
+  </div>
+
+  <p>
+    So <b>block-shape legality is a hardware-only check</b>, and a clean interpret-mode run
+    is evidence of nothing whatsoever about it. Apply the rule yourself. This does that:
+  </p>
+
+  <div id="check"></div>
+
+  <p class="sidenote">
+    The presets walk the interesting cases: an illegal shape that runs anyway, a whole-array
+    block that is legal precisely <i>because</i> it is whole, a legal Gemma-shaped query
+    tile, and the one case where the rule as written does not decide.
+  </p>
+
+  <div class="warn">
+    <span class="note-label">An ambiguity, flagged rather than resolved</span>
+    <p>"must be equal to the respective dimension of the overall array, or be divisible by 8
+    and 128 respectively" has two readings. <b>Per-axis:</b> each trailing axis independently
+    either matches the array or divides. <b>Paired:</b> either both match, or both divide.
+    They agree almost everywhere and disagree exactly when one axis is satisfied by equality
+    and the other by divisibility — an <code>(8, 7)</code> block on a <code>(16, 7)</code>
+    array is legal under the first reading and illegal under the second. The docs do not
+    disambiguate, and no CPU can tell you. The checker reports it as
+    <b>ambiguous</b> rather than guessing; treat it as illegal until a chip says otherwise.
+    This is a good candidate for your first
+    <a href="https://github.com/jax-ml/jax/discussions">jax-ml/jax Discussions</a> post —
+    it is small, concrete, and genuinely undecided by the documentation.</p>
+  </div>
+
+  <h2>3 · When the block does not divide the array</h2>
+
+  <p>
+    Legality is not the same question as divisibility. A block may be perfectly legal and
+    still not tile the array evenly — <code>bkv = 128</code> against a kv length of 500, say.
+    Pallas permits it, and defines exactly what you get:
+  </p>
+
+  <blockquote>
+    If the block shape does not divide evenly the overall shape then the last iteration on
+    each axis will still receive references to blocks of <code>block_shape</code> but the
+    elements that are out-of-bounds are <b>padded on input and discarded on output</b>. The
+    values of the padding are <b>unspecified, and you should assume they are garbage</b>. In
+    the <code>interpret=True</code> mode, we pad with NaN for floating-point values… but
+    this behavior should not be depended upon.
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/grid_blockspec.html#blockspec-a-k-a-how-to-chunk-up-inputs">Grids and BlockSpecs</a></cite>
+  </blockquote>
+
+  <p>
+    Verified here, in both modes, on a <code>(7, 5)</code> array of ones read through
+    <code>(2, 3)</code> blocks — <code>1.0</code> where the block's last element is real,
+    <code>NaN</code> where it is padding:
+  </p>
+
+  <pre><code>[[ 1. nan]
+ [ 1. nan]
+ [ 1. nan]
+ [nan nan]]</code></pre>
+
+  <p>
+    Read two consequences off that, both of which cost people kernels:
+  </p>
+
+  <ul>
+    <li><b>The grid still runs every step.</b> All eight, here. A padded block is not a
+      skipped block — it is fetched, computed, and its out-of-range outputs thrown away.
+      Traffic and FLOPs are paid in full.</li>
+    <li><b>Padding pads the shape. It does not neutralise the values.</b> Garbage rows go
+      into your <code>QKᵀ</code> like any other rows. Nothing is masked for you.</li>
+  </ul>
+
+  <p>
+    That second point lands directly on <a href="0002-the-normaliser-you-dont-have-yet.html">lesson
+    02</a>. A running max over a tile containing unspecified garbage is a running max over
+    garbage, and one <code>+inf</code> in the padding poisons the whole query row through
+    <code>α</code>. The mask is not optional decoration on top of a tiled kernel; it is what
+    makes the tiling survivable.
+  </p>
+
+  <h2>4 · Rule two: the VMEM budget</h2>
+
+  <p>
+    Now the other question lesson 03 skipped. Every operand your kernel touches is a VMEM
+    buffer, and <a href="0003-which-axis-goes-last.html">double buffering</a> — the thing
+    that made the pipeline overlap compute with transfer — was never free. It was a factor
+    of two you had not yet been asked to pay.
+  </p>
+
+  <blockquote>
+    The default buffer count is <b>2</b> for all inputs and outputs.
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/tpu/pipelining.html#multiple-buffering">TPU Pipelining · Multiple Buffering</a></cite>
+  </blockquote>
+
+  <p>Which gives the whole rule, in one line per operand:</p>
+
+  <p class="eq">
+    bytes(operand) = prod(block_shape) × itemsize × buffer_count
+  </p>
+
+  <p>
+    with three amendments, each of which moves real numbers:
+  </p>
+
+  <ul>
+    <li><b>Scratch counts once.</b> Buffers from <code>scratch_shapes</code> "are persistent
+      across kernel iterations"
+      (<a href="https://docs.jax.dev/en/latest/pallas/tpu/pipelining.html#tpu-memory-spaces">TPU
+      Pipelining</a>), so they are not doubled.</li>
+    <li><b>A whole-array operand counts once too.</b> When a block covers the entire array
+      and its <code>index_map</code> returns literal zeros, lowering forces single
+      buffering — there is no next slice to prefetch.
+      (<a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001
+      §2.3</a>, from <code>lowering.py</code>.)</li>
+    <li><b>The score tile is in the budget.</b> It never appears in a <code>BlockSpec</code>,
+      because it is an intermediate — but <code>details.rst</code> names "space necessary to
+      hold spilled vector registers" as part of what can overflow VMEM. A
+      <code>(512, 512)</code> f32 tile is 256 registers' worth of <code>8 × 128</code>. It is
+      not going to live in the register file.</li>
+  </ul>
+
+  <p>
+    Add it up for this repo's shapes — <code>head_dim = 256</code>, MQA so one KV head,
+    <code>sliding_window = 512</code>, inputs bf16 and accumulators f32:
+  </p>
+
+  <div id="budget"></div>
+
+  <p>
+    <b>Four megabytes.</b> Three of operands and scratch, one of score tile. Against any
+    plausible v5e ceiling that is not close to binding, and the honest conclusion for
+    <i>this</i> kernel is that the VMEM budget is not the constraint you should be designing
+    around. That is worth knowing precisely because the next kernel may be different, and §6
+    is how you tell which one you are in.
+  </p>
+
+  <div class="warn">
+    <span class="note-label">This table was re-derived, and the source it replaces was wrong</span>
+    <p>Research 0001 §4.3 carries a version of this table marked <b>inferred</b> — the rules
+    are cited, the multiplication was the research agent's. Re-derived from scratch for this
+    lesson, its <i>total</i> is exactly right and its <i>inventory</i> is not: it has no
+    <code>o_scratch</code> row, and compensates by typing the output f32. Those two errors
+    cancel, because an f32 output at one buffer is the same bytes as a bf16 output at two.
+    Switch the widget's output dtype to <code>f32</code> and the cancellation breaks: the
+    real figure goes to 3.5 MiB while the old table still says 3. <b>A right answer reached
+    through a wrong inventory is not a right answer</b> — it is one that stops being right
+    the moment a shape changes. Scratch inventory here is taken from
+    <code>splash_attention_kernel.py</code> lines 1099–1101, which declares
+    <code>m_scratch</code> and <code>l_scratch</code> as <code>(bq, 128)</code> f32 and
+    <code>o_scratch</code> as <code>(bq, head_dim)</code> f32.</p>
+  </div>
+
+  <h2>5 · The number nobody agrees on</h2>
+
+  <p>
+    You will have noticed the ceiling in that widget is a dropdown. That is not a
+    convenience. <b>JAX contradicts itself about how much VMEM a v5e has</b>, inside its own
+    repository:
+  </p>
+
+  <table>
+    <thead><tr><th>Source</th><th>Says</th><th class="num">v5e VMEM</th></tr></thead>
+    <tbody>
+      <tr><td><code>details.rst</code></td><td>"fairly large… (16MB+)"</td><td class="num">16 MB</td></tr>
+      <tr class="highlight"><td><code>tpu_info.py</code></td><td><code>vmem_capacity_bytes</code></td><td class="num">128 MiB</td></tr>
+      <tr><td><code>pipelining.md</code></td><td>"TPU v5p contains 96MB"</td><td class="num">— (v5p)</td></tr>
+      <tr><td><code>tpu_info.py</code></td><td><code>vmem_capacity_bytes</code></td><td class="num">— (v5p: 64 MiB)</td></tr>
+      <tr><td>Cloud TPU v5e</td><td>never mentions VMEM</td><td class="num">—</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Note the fourth row: v5p is quoted as 96 MB on one JAX doc page and 64 MiB in JAX source.
+    That is a flat contradiction inside one repository, which tells you the prose pages are
+    not being maintained against the numbers. <code>details.rst</code> carries no
+    reviewed-date at all, and "16MB+" is exactly the v4 figure.
+  </p>
+
+  <div class="note">
+    <span class="note-label">How to resolve it</span>
+    <p><b>Prefer <code>tpu_info.py</code>: 128 MiB.</b> It is machine-readable, versioned
+    with the library, queryable from your own laptop, and it is what generates the published
+    hardware table — the doc page and the source <i>cannot</i> drift apart. Confirmed on this
+    machine: <code>vmem_capacity_bytes = 134217728</code>.</p>
+    <p>But do not stop at picking a side, because <b>at our shapes the disagreement changes
+    no decision</b>. Solve the budget for the largest square block each ceiling admits:
+    <code>1419</code> under 16 MiB, <code>5075</code> under 128 MiB. Gemma 3 1B's window is
+    512. Both ceilings are several times any block you would plausibly choose, so the
+    question is moot here — and saying <i>that</i> is a better answer than picking the
+    bigger number. The disagreement starts mattering when you tune a block into the low
+    thousands, and if you ever do, the number you need is not on this table at all: see the
+    trapdoor below.</p>
+  </div>
+
+  <div class="warn">
+    <span class="note-label">The trapdoor under both numbers</span>
+    <p>Neither figure is what your kernel actually gets. <code>pltpu.CompilerParams</code>
+    documents <code>vmem_limit_bytes</code> and says it "must be used in conjunction with the
+    <code>--xla_tpu_scoped_vmem_limit_kib=N</code> flag" — so the effective budget is an
+    <b>XLA scoped limit</b>, not the physical capacity. The default value of that flag is not
+    stated anywhere in the JAX Python tree. It is an open gap in
+    <a href="../RESOURCES.md">RESOURCES.md</a>, and it is the number a real out-of-memory
+    error would be measured against.</p>
+  </div>
+
+  <h2>6 · The shape of the function, not the size of the answer</h2>
+
+  <p>
+    "4 MiB" is an answer about Gemma 3 1B. The mission wants the thing that transfers. Look
+    at the widget's two colours again, and change <code>bq</code>:
+  </p>
+
+  <p class="eq">
+    operands + scratch = 6144 × b bytes &nbsp;&nbsp; <i>linear</i><br>
+    score tile = 4 × b² bytes &nbsp;&nbsp; <i>quadratic</i>
+  </p>
+
+  <table>
+    <thead><tr><th class="num">bq = bkv</th><th class="num">operands</th><th class="num">score tile</th><th class="num">total</th></tr></thead>
+    <tbody>
+      <tr><td class="num">128</td><td class="num">0.75 MiB</td><td class="num">0.06 MiB</td><td class="num">0.81 MiB</td></tr>
+      <tr><td class="num">512</td><td class="num">3.00 MiB</td><td class="num">1.00 MiB</td><td class="num">4.00 MiB</td></tr>
+      <tr class="highlight"><td class="num">1536</td><td class="num">9.00 MiB</td><td class="num">9.00 MiB</td><td class="num">18.00 MiB</td></tr>
+      <tr><td class="num">4096</td><td class="num">24.00 MiB</td><td class="num">64.00 MiB</td><td class="num">88.00 MiB</td></tr>
+    </tbody>
+  </table>
+
+  <div class="win">
+    <span class="note-label">The win</span>
+    <p><b>A tiled attention kernel has two VMEM regimes, and the crossover is a number you
+    can compute before writing any code.</b> Below it, the buffers dominate and doubling the
+    block roughly doubles the footprint — so the ×2 from double buffering is the term worth
+    arguing about. Above it, the score tile dominates and doubling the block <i>quadruples</i>
+    it — so <code>bq × bkv</code> is the term worth arguing about, and decoupling the
+    pipeline block from the compute block starts to pay. For these shapes the crossover is
+    <code>b = 1536</code>, and the window is 512, so we are firmly in the linear regime.
+    <i>Which regime am I in</i> is the question that transfers to the next kernel. "4 MiB" is
+    not.</p>
+  </div>
+
+  <p class="sidenote">
+    <code>splash_attention</code> does exactly this decoupling: <code>bkv</code> and
+    <code>bkv_compute</code> are separate knobs, with <code>bkv % bkv_compute == 0</code>
+    enforced. Pipeline granularity and compute granularity are not the same choice. Phase 6
+    material.
+  </p>
+
+  <p>
+    And now §1's loose thread. <code>m</code> and <code>ℓ</code> from
+    <a href="0002-the-normaliser-you-dont-have-yet.html">lesson 02</a> are one scalar per
+    query row — logically <code>(bq,)</code>. <code>splash_attention</code> declares them
+    <code>(bq, 128)</code>, one hundred and twenty-eight times as many elements. That is not
+    waste. The lane dimension pads to 128 either way, so the narrow version occupies the same
+    tiles and buys nothing; the wide one at least has somewhere to put per-lane partial work.
+    In the budget above, <code>m_scratch</code> and <code>l_scratch</code> cost 256 KiB each
+    — and a <code>(bq, 1)</code> version would have cost the same.
+  </p>
+
+  <h2>7 · Retrieve it</h2>
+
+  <p>
+    Two of these reach back to lessons 02 and 03. One of them cannot be answered by running
+    anything, which is the point of it.
+  </p>
+
+  <div id="quiz"></div>
+
+</article>
+
+<footer class="footer">
+
+  <h3>Read this next</h3>
+  <p>
+    <a href="https://docs.jax.dev/en/latest/pallas/tpu/details.html">Writing TPU kernels with
+    Pallas</a> — specifically <b>§Array Layouts</b>, which is short and is the source of
+    everything in §1 above. It explains sublanes and lanes from the register outward, and
+    once you have it, the <code>(8, 128)</code> rule stops being a rule to memorise and
+    becomes a shape you can re-derive. Read <b>§Noteworthy properties and restrictions</b> on
+    the same page for the VMEM failure mode. Standing caveat, which the page earns: it
+    carries <b>no reviewed-date</b> and its VMEM figure is stale — see §5. Weigh the source
+    code over the prose where they disagree.
+  </p>
+
+  <h3>Elsewhere in this workspace</h3>
+  <ul>
+    <li><a href="../reference/block-shapes-and-vmem.html">Reference · Block shapes and the VMEM budget</a> — the compressed version of this lesson, for when you are actually writing a <code>BlockSpec</code></li>
+    <li><a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — §4 and §5 are this lesson's sources, with the verified/inferred split</li>
+    <li><a href="0003-which-axis-goes-last.html">Lesson 03 · Which axis goes last</a> — where double buffering was introduced without its price tag</li>
+    <li><a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02 · The normaliser you don't have yet</a> — the accumulators that §4 budgets for</li>
+    <li><a href="0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a work map</a></li>
+    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
+    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+  </ul>
+
+  <h3>Where this goes</h3>
+  <p>
+    You can now write a complete <code>BlockSpec</code> and defend every number in it: which
+    axis goes last, how big the block may be, and whether it fits. What the grid still cannot
+    do is <b>refuse a block</b>. It walks every kv tile, including the ones
+    <a href="0001-the-mask-is-a-work-map.html">lesson 01</a> proved were dead. Phase 5 is
+    where the mask predicate finally becomes an <code>index_map</code> — and the mechanism
+    turns out not to be new machinery at all, but lesson 03's copy elision driven by a
+    prefetched table. Per
+    <a href="../docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a>,
+    that ordering is deliberate.
+  </p>
+
+  <div class="ask">
+    <b>Ask your teacher.</b> Good questions from this one: whether the score tile really
+    spills to VMEM or is re-materialised per lane group; why <code>o_scratch</code> exists at
+    all when the output ref is already an accumulator; and what a Mosaic VMEM
+    out-of-memory error actually looks like, since none of us has seen one. Two things here
+    are <i>genuinely open</i> rather than merely unasked, and both are yours to close: the
+    per-axis-versus-paired ambiguity in §2, and the default value of
+    <code>--xla_tpu_scoped_vmem_limit_kib</code> in §5. The first is a good first post to
+    <a href="https://github.com/jax-ml/jax/discussions">jax-ml/jax Discussions</a>; the
+    second needs a chip.
+  </div>
+
+</footer>
+
+<script src="../assets/block-shape-check.js"></script>
+<script src="../assets/vmem-budget.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+BlockShapeCheck.mount('#check', {
+  title: 'Block-shape rule — the check no CPU will do for you',
+  array: [6, 7],
+  block: [3, 7],
+  dtype: 'bf16',
+  presets: [
+    { label: 'illegal, runs anyway', array: [6, 7], block: [3, 7] },
+    { label: 'whole array', array: [6, 7], block: [6, 7] },
+    { label: 'Gemma Q tile', array: [2048, 256], block: [512, 256] },
+    { label: 'off by four', array: [2048, 256], block: [500, 256] },
+    { label: 'does not divide', array: [500, 256], block: [128, 256] },
+    { label: 'the ambiguous case', array: [16, 7], block: [8, 7] }
+  ]
+});
+
+var HEAD_DIM = 256, LANES = 128;
+
+VmemBudget.mount('#budget', {
+  title: 'VMEM budget — Gemma 3 1B windowed prefill, one head',
+  params: [
+    { name: 'bq',  label: 'query block',  values: [128, 256, 512, 1024, 2048], value: 512 },
+    { name: 'bkv', label: 'kv block',     values: [128, 256, 512, 1024, 2048], value: 512 }
+  ],
+  dtypes: { out: ['bf16', 'f32'] },
+  ceilings: [
+    { label: 'tpu_info.py — v5e, 128 MiB', bytes: 128 * 1024 * 1024 },
+    { label: 'details.rst — "16MB+"', bytes: 16 * 1024 * 1024 }
+  ],
+  operands: [
+    { name: 'Q', elements: function (p) { return p.bq * HEAD_DIM; },
+      shape: function (p) { return '(' + p.bq + ', 256)'; },
+      dtype: 'bf16', buffers: 2, note: 'pipelined input' },
+    { name: 'K', elements: function (p) { return p.bkv * HEAD_DIM; },
+      shape: function (p) { return '(' + p.bkv + ', 256)'; },
+      dtype: 'bf16', buffers: 2, note: 'pipelined input' },
+    { name: 'V', elements: function (p) { return p.bkv * HEAD_DIM; },
+      shape: function (p) { return '(' + p.bkv + ', 256)'; },
+      dtype: 'bf16', buffers: 2, note: 'pipelined input' },
+    { name: 'O', elements: function (p) { return p.bq * HEAD_DIM; },
+      shape: function (p) { return '(' + p.bq + ', 256)'; },
+      dtype: function (p) { return p.out; }, buffers: 2, note: 'pipelined output' },
+    { name: 'o_scratch', elements: function (p) { return p.bq * HEAD_DIM; },
+      shape: function (p) { return '(' + p.bq + ', 256)'; },
+      dtype: 'f32', buffers: 1, note: 'scratch — persistent, counted once' },
+    { name: 'm_scratch', elements: function (p) { return p.bq * LANES; },
+      shape: function (p) { return '(' + p.bq + ', 128)'; },
+      dtype: 'f32', buffers: 1, note: 'running max — one lane would cost the same' },
+    { name: 'l_scratch', elements: function (p) { return p.bq * LANES; },
+      shape: function (p) { return '(' + p.bq + ', 128)'; },
+      dtype: 'f32', buffers: 1, note: 'normaliser' },
+    { name: 'S', elements: function (p) { return p.bq * p.bkv; },
+      shape: function (p) { return '(' + p.bq + ', ' + p.bkv + ')'; },
+      dtype: 'f32', buffers: 1, quadratic: true,
+      note: 'score tile — no BlockSpec, spills from registers' }
+  ],
+  footnote: 'Rules cited in research 0001 §4.2; scratch inventory from ' +
+            'splash_attention_kernel.py lines 1099–1101. Re-derived for this lesson, ' +
+            'not quoted. Nothing here has been measured on hardware.'
+});
+
+Quiz.mount('#quiz', {
+  title: 'Retrieval practice',
+  questions: [
+    {
+      stem: 'A <code>(2048, 256)</code> array of bf16 keys. Exactly one of these block shapes is legal on a v5e. Which?',
+      options: ['(256, 250) on (2048, 256)',
+                '(500, 256) on (2048, 256)',
+                '(504, 256) on (2048, 256)',
+                '(512, 200) on (2048, 256)'],
+      answer: 2,
+      why: 'Take the trailing axes one at a time. <b>(504, 256):</b> 504 = 8×63 so the second-minor divides, and 256 <i>is</i> the array\'s last dimension, so the minor axis satisfies the rule by equality. Legal. <b>(500, 256):</b> 500 = 8×62.5. Four short. <b>(512, 200)</b> and <b>(256, 250):</b> the second-minor is fine in both, but 200 and 250 are neither equal to 256 nor divisible by 128. The trap in all three is assuming "close to a nice number" is the rule — the rule is divisibility, and 500 is not 504.'
+    },
+    {
+      stem: 'You ship a kernel with <code>(3, 7)</code> blocks over a <code>(6, 7)</code> array. It runs clean under <code>interpret=True</code>, and clean under <code>pltpu.InterpretParams()</code> too, matching your reference to 1e-6. What have you established about the block shape?',
+      options: ['that Mosaic accepts this block shape',
+                'that the shape satisfies TPU tiling',
+                'that the padded tail was discarded',
+                'nothing at all about shape legality'],
+      answer: 3,
+      why: 'Nothing. Both interpreters allocate ordinary host arrays; neither models sublanes or lanes, so neither can reject a shape for failing to tile into them. Legality is checked by Mosaic, at compile time, on hardware — and 3 is neither 6 nor a multiple of 8. Two agreeing interpreters do not make a quorum when both are the same kind of wrong. <b>Note what makes this question answerable: naming the thing you ran.</b> "It passed" is not a result. "It passed under two interpreters, neither of which models the register file" is.'
+    },
+    {
+      stem: 'Your kv length is 500 and <code>bkv = 128</code>, so the final kv block holds 116 rows of real keys and 12 rows of out-of-bounds padding. What does Pallas do with those 12 rows?',
+      options: ['hands you unspecified garbage in them',
+                'quietly zeroes them before the kernel',
+                'skips the step containing that padding',
+                'neutralises them before the kernel runs'],
+      answer: 0,
+      why: '"The values of the padding are unspecified, and you should assume they are garbage." Interpret mode fills them with NaN as a courtesy and the docs say outright not to depend on it — on hardware you get whatever was there. The step is <i>not</i> skipped: it is fetched, computed, and its out-of-range outputs discarded, so you pay the traffic and the FLOPs regardless. <b>Padding pads the shape; masking neutralises the values; they are different jobs and only one of them is done for you.</b> Feed garbage scores into lesson 02\'s running max and one <code>+inf</code> takes the whole query row with it.'
+    },
+    {
+      stem: 'At <code>bq = bkv = 512</code> this kernel needs 4 MiB of VMEM. You double both to <code>1024</code>. The new figure is…',
+      options: ['5 MiB', '8 MiB', '10 MiB', '16 MiB'],
+      answer: 2,
+      why: '10 MiB, because the footprint is not one term. The operand and scratch buffers are <b>linear</b> in the block size — 3 MiB doubles to 6. The score tile is <code>bq × bkv</code>, so it is <b>quadratic</b> — 1 MiB quadruples to 4. Total 10. Neither 8 (assuming everything is linear) nor 16 (assuming everything is quadratic) is right, and which mistake you would have made tells you which term you were not tracking. Push far enough and the quadratic term wins outright: the two are equal at <code>b = 1536</code>.'
+    },
+    {
+      stem: 'From lesson 03. An operand\'s block covers the whole array and its <code>index_map</code> returns literal zeros, so it is resident for the kernel\'s entire life. How many VMEM buffers does <code>pallas_call</code> allocate for it?',
+      options: ['zero buffers', 'one buffer', 'two buffers', 'four buffers'],
+      answer: 1,
+      why: 'One. Double buffering exists so a fetch for step <i>i+1</i> can overlap the compute for step <i>i</i> — but if the block never changes there is no next slice to fetch, and the second buffer would sit idle forever. Lowering detects exactly this case (<code>has_trivial_window</code>: "block shape is same as the array shape and index_map returns 0s") and forces single buffering. So the residency you learned to engineer in lesson 03 also <i>halves</i> that operand\'s VMEM cost, which is why <code>splash_attention</code>\'s <code>m</code>, <code>ℓ</code> and <code>o</code> scratch are specified that way.'
+    },
+    {
+      stem: 'From lesson 02. <code>m</code> and <code>ℓ</code> are one scalar per query row, so logically shape <code>(bq,)</code>. <code>splash_attention</code> declares them <code>(bq, 128)</code> — 128× the elements. The best reason is…',
+      options: ['the MXU needs a 128-wide operand here',
+                'the extra lanes hold the running max',
+                'one lane per query row is disallowed',
+                'a singleton lane pads to 128 anyway'],
+      answer: 3,
+      why: 'It is free. The last two array dimensions are mapped onto the 8×128 vector registers, and everything is "padded up to the tile size" — so a <code>(bq, 1)</code> array occupies exactly the tiles a <code>(bq, 128)</code> one does. The narrow version costs the same and gives you nothing. Not "disallowed": a trailing dimension of 1 is perfectly legal when the array dimension is also 1 — it is merely wasteful, which is a different complaint. And not the MXU: this is the vector unit\'s register layout, not a matmul operand. The general form is a design smell worth recognising — <b>a singleton trailing dimension is width you have already paid for and declined to use.</b>'
+    }
+  ]
+});
+</script>
+
+</body>
+</html>

@@ -78,9 +78,11 @@ parametric recall.
 ### Workspace research
 
 - [research 0001 · Pallas grid, `BlockSpec`, `index_map`](docs/research/0001-pallas-grid-blockspec-index-map.md)
-  Primary-source findings behind lesson 03, with a verified/inferred split and four
-  documented disagreements inside the JAX tree. Use for: the copy-elision rule and the
-  interpret-mode experiments that demonstrate it.
+  Primary-source findings behind lessons 03 and 04, with a verified/inferred split and five
+  documented disagreements inside the JAX tree. Use for: the copy-elision rule (§3), the
+  VMEM budget (§4), the block-shape rule (§5), and the interpret-mode experiments that
+  demonstrate them. **§4.3 was re-derived and corrected in session 6** — the parts still
+  marked *inferred* are inferred.
 
 ## Wisdom (Communities)
 
@@ -119,3 +121,11 @@ practitioners. Nothing has been posted yet.
 - **`RevisitMode.ANY`** — documented only in `jax/_src/pallas/core.py`, rejected by
   lowering when `buffer_count > 1`, zero doc-page coverage. Possibly the escape hatch for
   a shrunk grid whose output blocks are not visited consecutively; possibly a dead end.
+- **Which reading of the `(8, 128)` block-shape rule Mosaic implements.** "The last two
+  dimensions … must be equal to the respective dimension of the overall array, or be
+  divisible by 8 and 128 respectively" is ambiguous between a per-axis and a paired
+  disjunction; they disagree on an `(8, 7)` block over a `(16, 7)` array. Interpret mode
+  cannot adjudicate — it accepts illegal shapes in both modes. See
+  [research 0001](docs/research/0001-pallas-grid-blockspec-index-map.md) §5.1.
+  **The best first candidate for a jax-ml/jax Discussions post**: one sentence, one
+  counter-example, no experiment to defend.

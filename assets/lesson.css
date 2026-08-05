@@ -346,6 +346,76 @@ th.pg-count {
   font-size: 0.62rem;
 }
 
+/* ---- block-shape-check.js ---- */
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1.1rem;
+}
+.btn {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  padding: 0.3rem 0.65rem;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.verdict {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  padding: 0.12rem 0.45rem;
+  border-radius: 2px;
+  margin-right: 0.45rem;
+  vertical-align: 0.08em;
+}
+.verdict-legal { background: var(--dead); color: var(--ink); }
+.verdict-illegal { background: var(--accent); color: var(--paper); }
+.verdict-ambiguous { background: transparent; color: var(--accent); border: 1px dashed var(--accent); }
+.verdict-error { background: transparent; color: var(--ink-muted); }
+
+/* ---- vmem-budget.js ---- */
+
+table.budget { width: 100%; }
+table.budget th:first-child { min-width: 5.5rem; }
+table.budget td { text-align: left; min-width: 0; }
+td.budget-bytes {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--ink);
+}
+td.budget-note { color: var(--ink-muted); font-size: 0.66rem; }
+tr.budget-quad td, tr.budget-quad th { color: var(--ink-muted); }
+tr.budget-total th, tr.budget-total td {
+  border-top: 1px solid var(--rule);
+  color: var(--accent);
+  font-weight: 600;
+  padding-top: 0.35rem;
+}
+
+.budget-bar {
+  display: flex;
+  height: 0.85rem;
+  margin: 1.1rem 0 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  overflow: hidden;
+  background: repeating-linear-gradient(
+    45deg, transparent, transparent 4px,
+    color-mix(in srgb, var(--rule) 45%, transparent) 4px,
+    color-mix(in srgb, var(--rule) 45%, transparent) 8px);
+}
+.budget-fill-lin { background: var(--accent); }
+.budget-fill-quad { background: var(--dead); }
+
 /* ---- quiz ---- */
 
 .q { margin-bottom: 1.7rem; }

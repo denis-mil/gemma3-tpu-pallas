@@ -25,10 +25,12 @@ reproduced inline below):
 - Output revisiting acts as an accumulator; putting the reduction on a leading grid
   axis instead of the trailing one produces a wrong answer.
 - `None` in `block_shape` squeezes the axis out of the ref.
-- Out-of-bounds block elements are padded, with NaN under interpret mode.
+- Out-of-bounds block elements are padded, with NaN under interpret mode — **both modes,
+  re-checked session 6**.
 - `dimension_semantics=("parallel", ...)` visibly reorders grid traversal under
   interpret mode.
-- Interpret mode does **not** enforce the TPU `(8, 128)` block-shape rule.
+- Interpret mode does **not** enforce the TPU `(8, 128)` block-shape rule — **both modes,
+  re-checked session 6**, two independent illegal shapes.
 - v5e per-TensorCore hardware numbers as JAX reports them (`pltpu.get_tpu_info_for_chip`).
 
 **Verified by reading a primary source** (documentation prose or JAX source, not run):
@@ -43,7 +45,9 @@ reproduced inline below):
 **Inferred — reasoning I did, not a claim any source makes:**
 
 - The VMEM budget arithmetic for a Gemma 3 1B windowed-prefill kernel (§4.3). The
-  *rules* are cited; multiplying them out for our shapes is mine.
+  *rules* are cited; multiplying them out for our shapes is mine. **Re-derived
+  independently in session 6 and corrected — the original total was right and its
+  inventory was not.** See §4.3.
 - That interpret mode's copy-elision logic faithfully mirrors what the Mosaic compiler
   emits on hardware. The interpreter clearly implements the *same rule* (§3.4), but the
   hardware pipeline is emitted by the Mosaic/XLA compiler, which is not in the Python
@@ -599,26 +603,60 @@ iterations" ([same page](https://docs.jax.dev/en/latest/pallas/tpu/pipelining.ht
 so they count once. On top of that sit spilled vector registers, which `details.rst` names
 explicitly as part of the budget.
 
-### 4.3 Worked, for this repo's shapes — *inferred*
+### 4.3 Worked, for this repo's shapes — *inferred*, **re-derived and corrected in session 6**
 
 Windowed prefill, Gemma 3 1B (`src/gemma3_pallas/shapes.py`): `head_dim = 256`,
 `num_kv_heads = 1` (MQA), `sliding_window = 512`. Take `bq = bkv = 512`, inputs bf16,
-accumulators f32.
+accumulators f32. Scratch inventory taken from `splash_attention_kernel.py` lines
+1099–1101, which is the only reference kernel in reach:
 
-| Operand | Block shape | dtype | Bytes | ×buffers | VMEM |
+```python
+      jax.ShapeDtypeStruct((bq, NUM_LANES), jnp.float32),   # m_scratch
+      jax.ShapeDtypeStruct((bq, NUM_LANES), jnp.float32),   # l_scratch
+      jax.ShapeDtypeStruct((bq, head_dim_v), jnp.float32),  # o_scratch
+```
+
+| Buffer | Block shape | dtype | Bytes | ×buffers | VMEM |
 |---|---|---|---|---|---|
 | Q | (512, 256) | bf16 | 256 KiB | 2 | 512 KiB |
 | K | (512, 256) | bf16 | 256 KiB | 2 | 512 KiB |
 | V | (512, 256) | bf16 | 256 KiB | 2 | 512 KiB |
-| O | (512, 256) | f32  | 512 KiB | 2 | 1024 KiB |
-| `m`, `l` scratch | (512, 128) | f32 | 256 KiB each | 1 | 512 KiB |
-| **Total** | | | | | **≈ 3 MiB** |
+| O (output) | (512, 256) | bf16 | 256 KiB | 2 | 512 KiB |
+| `o_scratch` | (512, 256) | f32 | 512 KiB | 1 | 512 KiB |
+| `m_scratch` | (512, 128) | f32 | 256 KiB | 1 | 256 KiB |
+| `l_scratch` | (512, 128) | f32 | 256 KiB | 1 | 256 KiB |
+| **Subtotal** | | | | | **3 MiB** |
+| score tile | (512, 512) | f32 | 1 MiB | 1 | 1 MiB |
+| **Total** | | | | | **4 MiB** |
 
-Plus the `(512, 512)` f32 logits tile — 1 MiB — which lives in vector registers and
-spills to VMEM if it does not fit. Against a 128 MiB v5e VMEM this is not close to
-binding; against the 16 MiB that `details.rst` quotes it is still comfortable. **The
-arithmetic is mine; only the rules it applies are cited.** No number here has been
-measured on hardware.
+**What the earlier version of this table got wrong.** It had no `o_scratch` row and
+typed the output f32. Those two errors cancel exactly — an f32 output at two buffers is
+the same byte count as a bf16 output at two buffers *plus* an f32 scratch at one — so the
+3 MiB subtotal was right by coincidence. The cancellation breaks the moment the kernel
+emits f32 output, where the true subtotal is **3.5 MiB** and the old table still says 3.
+Re-derived from the cited rules, not re-read.
+
+The score tile is 1 MiB and is 256 vector registers' worth of `8 × 128`; it does not fit
+in a register file and `details.rst` names spilled vector registers as part of the budget,
+so it belongs in the total rather than in a footnote.
+
+**The shape of the function matters more than this row of it.** With square blocks `b`,
+the operand and scratch terms are **linear** — 6144·`b` bytes for these shapes — and the
+score tile is **quadratic**, 4·`b`² bytes. They cross at `b = 1536`:
+
+| bq = bkv | operands + scratch | score tile | total |
+|---|---|---|---|
+| 128 | 0.75 MiB | 0.06 MiB | 0.81 MiB |
+| 512 | 3.00 MiB | 1.00 MiB | 4.00 MiB |
+| 1536 | 9.00 MiB | 9.00 MiB | 18.00 MiB |
+| 4096 | 24.00 MiB | 64.00 MiB | 88.00 MiB |
+
+Solving `4b² + 6144b = capacity` gives the largest square block each contested VMEM figure
+admits: **b ≈ 1419** under `details.rst`'s 16 MiB, **b ≈ 5075** under `tpu_info.py`'s
+128 MiB. Since the window is 512, **the VMEM disagreement changes no decision at our
+shapes** — which is a better answer than picking one of the two numbers. **The arithmetic
+is mine; only the rules it applies are cited.** No number here has been measured on
+hardware.
 
 ### 4.4 The failure mode
 
@@ -669,6 +707,24 @@ complete of the two:
 `8 | dim[-2]` and `128 | dim[-1]`, *or* the block simply equals the array along that axis.
 A `(7, 5)` array with a `(7, 5)` block is legal; a `(7, 5)` array with a `(2, 3)` block is
 not.
+
+The rank-1 floor `128 * (32 / bitwidth)` works out to **128** for f32, **256** for bf16 and
+**512** for int8.
+
+**The sentence is ambiguous, and this document previously resolved it silently — flagged in
+session 6.** Two readings:
+
+| Reading | Predicate |
+|---|---|
+| per-axis | `(blk[-2] == arr[-2] or 8 \| blk[-2])` **and** `(blk[-1] == arr[-1] or 128 \| blk[-1])` |
+| paired | `(blk[-2:] == arr[-2:])` **or** `(8 \| blk[-2] and 128 \| blk[-1])` |
+
+They agree almost everywhere and diverge exactly when one trailing axis is satisfied by
+equality and the other by divisibility — an `(8, 7)` block on a `(16, 7)` array is legal
+per-axis and illegal paired. The `(3, 7)`-on-`(6, 7)` analysis in §5.4 assumes the per-axis
+reading. Nothing in the docs decides it, and §5.4 shows no CPU can. **Unresolved. Good
+candidate for a jax-ml/jax Discussions post** — small, concrete, and answerable by anyone
+with a chip.
 
 ### 5.2 Why 8 and 128
 
@@ -723,17 +779,31 @@ still runs the full 4×2 steps** — the padded blocks are not skipped, they are
 their out-of-range outputs thrown away. If your kernel needs a mask, this is why: Pallas
 pads the *shape*, it does not neutralise the *values*.
 
+**Re-run in both interpret modes, session 6: identical output.** The NaN padding is not a
+single-interpreter artefact. (§3.3 is the reason that needed checking.)
+
 ### 5.4 Interpret mode will not catch a bad block shape
 
 ```
-block_shape=(3,7) on a (6,7) array ACCEPTED under interpret=True; shape (6, 7)
+block_shape=(3,7) on a (6,7) array
+  interpret=True        -> ACCEPTED   shape (6, 7)
+  InterpretParams()     -> ACCEPTED   shape (6, 7)
+
+block_shape=(8,64) on a (16,128) array
+  interpret=True        -> ACCEPTED   shape (16, 128)
+  InterpretParams()     -> ACCEPTED   shape (16, 128)
 ```
 
-`(3, 7)` violates §5.1 on both trailing dims (3 ∤ 8 and ≠ 6; 7 ∤ 128 but *does* equal the
-array dim, so only the second-minor is actually illegal). Interpret mode runs it happily.
-**Block-shape legality is a hardware-only check.** For a workflow that develops on CPU and
-validates on scarce Colab TPU time, this is a landmine: the shape rule has to be applied
-by hand, at authoring time.
+`(3, 7)` violates §5.1 on the second-minor dim (3 ∤ 8 and ≠ 6; 7 ∤ 128 but *does* equal the
+array dim, so the minor axis is satisfied by equality). `(8, 64)` is the mirror case — the
+second-minor is fine, the minor is not. Both interpreters run both happily.
+
+**Checked in both modes, session 6.** The original result here was taken under
+`interpret=True` only and generalised to "interpret mode", which is exactly the error §3.3
+carried. This time the generalisation holds: **block-shape legality is a hardware-only
+check** under either interpreter. For a workflow that develops on CPU and validates on
+scarce Colab TPU time, this is a landmine — the shape rule has to be applied by hand, at
+authoring time. `assets/block-shape-check.js` mechanises it, including the §5.1 ambiguity.
 
 ---
 
@@ -961,6 +1031,11 @@ it is talking about.
 Minor, and mostly a unit-convention artefact, but a roofline that quotes a utilisation
 percentage should say which it used.
 
+**5. The block-shape rule has two readings and the docs do not pick one. Unresolved.**
+Per-axis versus paired — see §5.1 for the predicates and the `(8, 7)`-on-`(16, 7)` case
+that splits them. Added session 6; the earlier text applied the per-axis reading without
+noting there was a choice.
+
 ---
 
 ## Still open
@@ -989,7 +1064,11 @@ Feeds back into `RESOURCES.md` `## Gaps`.
 - **Whether `interpret=True` and `pltpu.InterpretParams()` ever diverge on copy elision.**
   They agreed on every probe here, but they are separate implementations
   (`hlo_interpreter.py` vs `interpret/interpret_pallas_call.py`) and only one of them was
-  read.
+  read. They *do* diverge on write-through to an input ref (§3.3); they do **not** diverge
+  on block-shape legality or on padding (§5.3, §5.4, both re-checked session 6).
+- **Which reading of the block-shape rule Mosaic actually implements** (§5.1). Per-axis or
+  paired. One `pallas_call` with an `(8, 7)` block on a `(16, 7)` array, on any TPU, settles
+  it. Cheap in TPU time; worth bundling with any other on-chip errand.
 - **`RevisitMode.ANY`.** `core.py` documents it as inserting "additional DMAs as needed to
   restore the buffer state", enabling non-consecutive output revisiting — and
   `lowering.py` rejects it when `buffer_count > 1`. No doc-page coverage at all. Possibly
@@ -1094,8 +1173,9 @@ from the snippets above. Run with
 | 3.3 | residency flips with grid axis order (3/12 vs 12/4 DMAs) | both — counts agree, **raw traces do not** |
 | 3.3 | constant sentinel lies about the non-resident operand | `interpret=True` only |
 | 3.6 | accumulator correct only on the last grid axis | `interpret=True` |
-| 5.3 | padding on non-dividing blocks, NaN under interpret | `interpret=True` |
-| 5.4 | illegal `(3, 7)` block accepted on CPU | `interpret=True` |
+| 5.3 | padding on non-dividing blocks, NaN under interpret | both modes, agreeing |
+| 5.4 | illegal `(3, 7)` and `(8, 64)` blocks accepted on CPU | both modes, agreeing |
+| 4.3 | the VMEM budget, re-derived from the cited rules | no Pallas needed — arithmetic |
 | 6.1 | `None` squeezes the axis | `interpret=True` |
 
 Standing caveat for all of them: **interpret mode may not model real DMA behaviour**
