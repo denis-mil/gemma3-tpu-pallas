@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 03 · Which axis goes last</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Lesson 03 · Windowed prefill</p>
+  <h1>Which axis goes last</h1>
+  <p class="standfirst">
+    Two nested loops, same twelve steps, same arithmetic. Order them one way and you
+    move three blocks of queries. Order them the other way and you move twelve. Nothing
+    in the kernel body changed.
+  </p>
+
+  <p>
+    <a href="0001-the-mask-is-a-work-map.html">Lesson 01</a> decided <i>which</i> tiles are
+    worth loading. <a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02</a>
+    decided what to <i>do</i> with one once it arrives. Neither said a word about what
+    actually moves the data. That is this lesson, and it turns out to hinge on a single
+    structural choice you make before writing any kernel body at all.
+  </p>
+
+  <h2>1 · Twelve steps, two ways</h2>
+
+  <p class="sidenote">
+    <code>(8, 128)</code> blocks because TPU wants that shape — the rule and the reason
+    are lesson 04. Take the numbers on faith for one lesson; nothing here depends on them.
+  </p>
+
+  <p>
+    Your kernel walks query blocks on the outside and key blocks on the inside — three of
+    the first, four of the second. In Pallas that is a <b>grid</b>, and each operand gets a
+    <code>BlockSpec</code> saying which slice of it this step needs:
+  </p>
+
+  <pre><code>pl.pallas_call(
+    kernel,
+    grid=(3, 4),                                      <span class="dim"># i_q outer, j_kv inner</span>
+    in_specs=[
+        pl.BlockSpec((8, 128), lambda i, j: (i, 0)),  <span class="dim"># Q — ignores j</span>
+        pl.BlockSpec((8, 128), lambda i, j: (j, 0)),  <span class="dim"># K — follows j</span>
+    ],
+)</code></pre>
+
+  <p>
+    Twelve steps. Q is used at every one of them, K is used at every one of them. Here is
+    what each step actually costs in traffic:
+  </p>
+
+  <div id="fixed"></div>
+
+  <p>
+    <b>Q: 3 copies. K: 12.</b> Now swap the two grid axes — keep the block shapes, keep
+    every <code>index_map</code> pointing at the same data, change nothing but which loop
+    is on the outside:
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>grid</th><th class="num">Q copies</th><th class="num">K copies</th><th class="num">steps</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>(3, 4)</code> — <code>i_q</code> outer</td><td class="num">3</td><td class="num">12</td><td class="num">12</td></tr>
+      <tr><td><code>(4, 3)</code> — <code>j_kv</code> outer</td><td class="num">12</td><td class="num">4</td><td class="num">12</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Same twelve steps, same block shapes, same FLOPs, <b>4× the Q traffic</b>. The rest of
+    this lesson is why, and how to see it coming.
+  </p>
+
+  <h2>2 · Three facts, and the numbers follow</h2>
+
+  <p>
+    <b>First: the operands are not where the kernel thinks they are.</b>
+  </p>
+
+  <blockquote>
+    The default behavior for <code>pallas_call</code> on TPU is that arguments to
+    <code>pallas_call</code> are assumed to live in HBM, and inputs to the user kernel body
+    are stored in VMEM.
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/tpu/pipelining.html#tpu-memory-spaces">TPU Pipelining · TPU Memory Spaces</a></cite>
+  </blockquote>
+
+  <p>
+    So every ref your kernel body touches is a VMEM buffer that something had to fill by
+    DMA from HBM. <b>Counting copies is counting the kernel's bandwidth bill.</b>
+  </p>
+
+  <p>
+    <b>Second: the grid is a loop nest, and the last axis is the inner loop.</b>
+  </p>
+
+  <blockquote>
+    <code>pl.pallas_call(some_kernel, grid=(n, m))(...)</code> is equivalent to
+    <br><code>for i in range(n): for j in range(m): some_kernel(...)</code>
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/grid_blockspec.html#grid-a-k-a-kernels-in-a-loop">Grids and BlockSpecs</a></cite>
+  </blockquote>
+
+  <p>
+    And on TPU that nesting is a guarantee rather than a hint — <i>"TPUs are actually
+    highly sequential machines… the grid is generally not processed in parallel, but
+    sequentially, in lexicographic order"</i>
+    (<a href="https://docs.jax.dev/en/latest/pallas/tpu/details.html#noteworthy-properties-and-restrictions">Writing
+    TPU kernels with Pallas</a>). You may rely on the order. That matters, because the
+    third fact is entirely about what <i>consecutive</i> means.
+  </p>
+
+  <p>
+    <b>Third: <code>index_map</code> returns block indices, not element offsets.</b>
+  </p>
+
+  <blockquote>
+    the <code>index_map</code> … takes as arguments the invocation indices … and returns
+    <b>block indices</b> (one block index for each axis of the overall array). Each block
+    index is then multiplied by the corresponding axis size from <code>block_shape</code>
+    to get the actual element index.
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/grid_blockspec.html#blockspec-a-k-a-how-to-chunk-up-inputs">Grids and BlockSpecs · BlockSpec</a></cite>
+  </blockquote>
+
+  <p>
+    <code>lambda i, j: (i, 0)</code> does not mean "row <code>i</code>". It means "block
+    <code>i</code> down, block <code>0</code> across" — element row <code>8i</code>, since
+    the block is 8 tall. Two things worth noticing about that lambda, and both are the
+    lesson:
+  </p>
+
+  <ul>
+    <li>It is a <b>function of the loop counters</b>, evaluated fresh at every grid step.</li>
+    <li>It <b>ignores <code>j</code></b>. Across all four values of <code>j</code>, it
+      returns the same answer.</li>
+  </ul>
+
+  <h2>3 · The rule</h2>
+
+  <p>
+    Everything above is setup for one sentence, and it is stated outright in the docs:
+  </p>
+
+  <blockquote>
+    When two (lexicographically) consecutive grid indices use the same slice of an input,
+    <b>the HBM transfer for the second iteration is skipped</b>, as the data is already
+    available.
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/tpu/details.html#noteworthy-properties-and-restrictions">Writing TPU kernels with Pallas</a></cite>
+  </blockquote>
+
+  <p>
+    Said a second way, in the pipelining guide, with the mechanism named:
+    <i>"if the data slices between two consecutive iterations are the same, the pipeline
+    will not issue a <code>copy_in</code>/<code>copy_out</code> on that buffer… the same
+    SRAM buffer used in a previous iteration will be passed into the kernel again"</i>
+    (<a href="https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation">Software
+    Pipelining</a>).
+  </p>
+
+  <p>
+    Now go back to §1 and the numbers are forced. <code>j</code> is the fast axis. Q's
+    <code>index_map</code> ignores <code>j</code>, so for four consecutive steps it returns
+    the same block index and three of the four copies are skipped — 3 DMAs, not 12. K's
+    <code>index_map</code> follows <code>j</code>, so it changes at every single step and
+    nothing is ever skipped.
+  </p>
+
+  <div class="win">
+    <span class="note-label">The win</span>
+    <p><b><code>index_map</code> decides residency, not just addressing.</b> An operand
+    stays in VMEM across a run of steps exactly when its <code>index_map</code> ignores the
+    <i>fastest-varying</i> grid axis. Which axis is fastest is the last one in the
+    <code>grid</code> tuple. So the operand you cannot afford to re-fetch determines which
+    axis goes last — that is the decision, and you make it before you write a line of the
+    kernel body.</p>
+  </div>
+
+  <div class="warn">
+    <span class="note-label">The trap in "swap the axes"</span>
+    <p>Swapping <code>grid=(3, 4)</code> to <code>grid=(4, 3)</code> silently
+    <b>renames the lambda's parameters</b>. The first positional argument is now
+    <code>j_kv</code>, not <code>i_q</code>. Q's spec has to become
+    <code>lambda j, i: (i, 0)</code> — same mapping, different signature. Leave it as
+    <code>lambda i, j: (i, 0)</code> and you have not reordered a loop, you have pointed Q
+    at the wrong data, and it will run.</p>
+  </div>
+
+  <h2>4 · Flip it yourself</h2>
+
+  <p>
+    Same three operands, same <code>index_map</code>s throughout. The only control is which
+    axis goes last. Watch the <code>D</code>s move.
+  </p>
+
+  <div id="dma"></div>
+
+  <p>
+    Predict before you switch. With <code>j_kv</code> outermost, which row goes solid?
+  </p>
+
+  <h2>5 · Outputs look the other way</h2>
+
+  <p>
+    You will have noticed <code>O</code> in that widget behaves like Q — one write-back per
+    query block, not one per step. That is the same rule, applied in the opposite
+    direction, and the asymmetry is exactly right:
+  </p>
+
+  <table>
+    <thead><tr><th>buffer</th><th>copies when</th></tr></thead>
+    <tbody>
+      <tr><td>input</td><td>first step, <b>or</b> the block index <b>changed since</b> the previous step</td></tr>
+      <tr><td>output</td><td>last step, <b>or</b> the block index <b>will change on</b> the next step</td></tr>
+    </tbody>
+  </table>
+
+  <p class="sidenote">
+    Both predicates are visible in JAX source, in two independent implementations that
+    agree — the interpreter and <code>pltpu.emit_pipeline</code>. See
+    <a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">research 0001 §3.4</a>.
+  </p>
+
+  <p>
+    Inputs look backwards; outputs look forwards. The consequence is the one that matters
+    to you: <b>when an output block is revisited on consecutive steps, the same VMEM buffer
+    comes back, un-flushed, still holding what you wrote.</b> It is an accumulator. And now
+    <a href="0002-the-normaliser-you-dont-have-yet.html">lesson 02</a> lands in a place you
+    were not expecting it:
+  </p>
+
+  <p class="eq">
+    m, ℓ, O accumulate across kv tiles<br>
+    ⇒ the output block index must not vary along the kv axis<br>
+    ⇒ <b>kv must be the last grid axis</b><br>
+    ⇒ Q is resident, K and V stream past it
+  </p>
+
+  <p>
+    The online-softmax recurrence does not merely <i>permit</i> that grid order. It
+    <b>requires</b> it. And having required it, it hands you the Q residency for free. The
+    docs impose the same thing from the other side — <i>"Reduction/accumulation should only
+    be performed over the last (innermost) dimensions of the grid, and the buffer should be
+    initialized manually first"</i>
+    (<a href="https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation">Software
+    Pipelining</a>).
+  </p>
+
+  <p>
+    Put the reduction on a leading axis instead and the revisits are no longer consecutive,
+    so every one of them round-trips through HBM and the accumulation is lost. Run in
+    interpret mode, that kernel returns <code>NaN</code> — uninitialised VMEM, never
+    zeroed, never accumulated. Two bugs surfacing as one number.
+  </p>
+
+  <div class="warn">
+    <span class="note-label">Verified, not asserted</span>
+    <p>The copy counts on this page were produced by execution, on CPU, under Pallas
+    interpret mode — by writing a per-step sentinel into an input buffer and checking
+    whether it survived. Two honest caveats. <b>One:</b> writing to an input ref is
+    something the docs explicitly forbid (<i>"input buffers … should be interpreted as
+    read-only"</i>) — it is an instrument here, not a technique; do not ship it.
+    <b>Two:</b> interpret mode is not hardware. The pipeline that runs on a v5e is emitted
+    by the Mosaic compiler, not by the Python you can read, and
+    <a href="https://github.com/jax-ml/jax/issues/36287">jax-ml/jax#36287</a> exists to
+    remind you the two can diverge. What is solid: the skip is <i>documented</i> behaviour
+    in two places, and two JAX-authored implementations honour it. What is not measured:
+    DMA counts on a real chip.</p>
+  </div>
+
+  <h2>6 · Retrieve it</h2>
+
+  <p>
+    Questions 5 and 6 reach back to lessons 02 and 01. That mixing is deliberate.
+  </p>
+
+  <div id="quiz"></div>
+
+</article>
+
+<footer class="footer">
+
+  <h3>Read this next</h3>
+  <p>
+    <a href="https://docs.jax.dev/en/latest/pallas/pipelining.html">Software Pipelining</a>
+    — <b>the whole page, in order</b>. It builds the double-buffered pipeline from first
+    principles rather than presenting it, and by the time it reaches §<i>Reductions and
+    accumulation</i> you will have derived §5 above yourself. The single most useful page
+    in the Pallas doc tree for this question. Its companion,
+    <a href="https://docs.jax.dev/en/latest/pallas/grid_blockspec.html">Grids and
+    BlockSpecs</a>, is the reference to keep open while writing specs — it includes an
+    executable <code>slices_for_invocation</code> you can call to check any
+    <code>index_map</code> you are unsure of.
+  </p>
+
+  <h3>Elsewhere in this workspace</h3>
+  <ul>
+    <li><a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — every claim above, with its source, plus the experiments that produced the numbers</li>
+    <li><a href="../reference/online-softmax.html">Reference · Online softmax</a> — the accumulators §5 is about</li>
+    <li><a href="../reference/block-skipping-arithmetic.html">Reference · Block-skipping arithmetic</a> — which tiles the grid should be walking at all</li>
+    <li><a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02 · The normaliser you don't have yet</a></li>
+    <li><a href="0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a work map</a></li>
+    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
+    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+  </ul>
+
+  <h3>Where this goes</h3>
+  <p>
+    Two things were taken on faith here and are owed to you. <b>Why <code>(8, 128)</code></b>
+    — TPU's block-shape rule, what it costs when your shapes do not divide, and the fact
+    that interpret mode will not catch a violation. <b>And whether the blocks fit at all</b>
+    — the VMEM budget, which is where double buffering stops being free and starts being a
+    number you multiply by two. That is lesson 04.
+  </p>
+  <p>
+    After that, Phase 5: this grid is still walking <i>every</i> kv block. Lesson 01 said
+    most of them are dead. Making the grid skip them is where the mask predicate finally
+    becomes an <code>index_map</code> — and per
+    <a href="../docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a>,
+    that ordering is deliberate.
+  </p>
+
+  <div class="ask">
+    <b>Ask your teacher.</b> Good questions from this one: what happens to residency when
+    an operand's <code>index_map</code> ignores <i>every</i> grid axis; why
+    <code>dimension_semantics=("parallel", …)</code> is nearly a no-op on v5e and still
+    worth writing; and whether the copy elision is something the hardware path actually
+    <i>guarantees</i> or merely does. That last one is a genuinely open question — it is
+    the standing candidate for your first post to
+    <a href="https://github.com/jax-ml/jax/discussions">jax-ml/jax Discussions</a>.
+  </div>
+
+</footer>
+
+<script src="../assets/pipeline-grid.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+var SPECS = [
+  { name: 'Q', kind: 'in',  map: function (ix) { return [ix.i_q, 0]; } },
+  { name: 'K', kind: 'in',  map: function (ix) { return [ix.j_kv, 0]; } },
+  { name: 'O', kind: 'out', map: function (ix) { return [ix.i_q, 0]; } }
+];
+
+PipelineGrid.mount('#fixed', {
+  title: 'grid = (3, 4) — j_kv is the inner loop',
+  axes: [['i_q', 3], ['j_kv', 4]],
+  operands: SPECS.slice(0, 2)
+});
+
+PipelineGrid.mount('#dma', {
+  title: 'Same BlockSpecs. Only the axis order changes.',
+  axes: [['i_q', 3], ['j_kv', 4]],
+  operands: SPECS,
+  controls: ['order']
+});
+
+Quiz.mount('#quiz', {
+  title: 'Retrieval practice',
+  questions: [
+    {
+      stem: '<code>grid = (3, 4)</code> with <code>i_q</code> outer. Q’s spec is <code>lambda i, j: (i, 0)</code>. Over the whole grid, Q is copied HBM→VMEM how many times?',
+      options: ['3 DMAs', '4 DMAs', '6 DMAs', '12 DMAs'],
+      answer: 0,
+      why: 'Three. <code>j</code> is the fast axis and Q’s index_map ignores it, so across each run of four consecutive steps the block index is unchanged and three of the four copies are skipped. One copy per value of <code>i</code>. K, whose index_map follows <code>j</code>, changes every step and pays all twelve.'
+    },
+    {
+      stem: 'An operand is fetched once per <i>outer</i> step rather than once per grid step exactly when its <code>index_map</code>…',
+      options: ['ignores the fastest axis',
+                'follows the fastest axis',
+                'ignores the slowest axis',
+                'follows the slowest axis'],
+      answer: 0,
+      why: 'The skip rule compares against the <i>immediately preceding</i> step, and consecutive steps differ only in the fastest-varying axis. So ignoring that axis is precisely what makes the index unchanged across a run. Ignoring the slowest axis buys nothing: the index still changes at every step, which is 12 DMAs, not 3.'
+    },
+    {
+      stem: 'Inputs copy in when the block index changed since the previous step. An output buffer is written back to HBM when…',
+      options: ['the index will change next',
+                'the index has just changed',
+                'the index stays the same',
+                'the index reaches its max'],
+      answer: 0,
+      why: 'Outputs look <i>forwards</i> — flush on the last step, or when the next step needs a different block. Inputs look backwards. That asymmetry is what makes a revisited output buffer usable as an accumulator: it is not flushed between consecutive visits, so what you wrote is still there when you come back.'
+    },
+    {
+      stem: 'You accumulate a reduction into the output ref. Which grid axis must it be reduced over?',
+      options: ['the innermost grid axis',
+                'the outermost grid axis',
+                'the smallest grid axis',
+                'the largest grid axis'],
+      answer: 0,
+      why: 'The innermost — the last entry of the <code>grid</code> tuple. The output block index must be constant across the steps you are accumulating over, and it is consecutive steps that get the buffer back un-flushed. Put the reduction on a leading axis and the revisits are separated by other blocks, so each one round-trips through HBM and the partial sums are lost. Sizes are irrelevant; position is everything.'
+    },
+    {
+      stem: 'From lesson 02: subtracting the <i>running max</i> makes every exponent <code>≤ 0</code>. State what that buys you, in one phrase.',
+      options: ['no overflow, by construction',
+                'no rounding, by construction',
+                'no rescales, by construction',
+                'less traffic, by construction'],
+      answer: 0,
+      why: 'Range, not accuracy. Every term lands in (0, 1], so <code>exp</code> cannot overflow — not "unlikely", <i>impossible</i>. Rounding is unaffected: online softmax is as accurate as safe softmax, not more. Swap the max for the running <i>minimum</i> and the answer is still exact, but exponents go <code>≥ 0</code> and that guarantee is gone — which is the whole reason it is a max.'
+    },
+    {
+      stem: 'From lesson 01: <code>N = 2048</code>, <code>B = 256</code>, so an 8×8 grid, kv innermost. A local layer has 3 live kv tiles per query row. The kernel keeps the full grid and masks. How many K copies?',
+      options: ['64 fetches', '24 fetches', '32 fetches', '8 fetches'],
+      answer: 0,
+      why: 'All 64. Masking happens <i>inside</i> the kernel body, after the DMA has already landed. The grid is what decides traffic, and a full 8×8 grid walks every kv block for every query block regardless of what the mask does to it afterwards. 24 is what a grid that skipped the dead tiles would cost — 2.7× less — and closing that gap is Phase 5. This is lesson 01’s thesis restated in the vocabulary of this one: <b>the mask does not save bandwidth. The grid does.</b>'
+    }
+  ]
+});
+</script>
+
+</body>
+</html>

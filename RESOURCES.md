@@ -48,8 +48,39 @@ parametric recall.
 - [Pallas: a JAX kernel language](https://docs.jax.dev/en/latest/pallas/index.html)
   Entry point. Use for: `pallas_call`, grid semantics, `BlockSpec` basics.
 - [Writing TPU kernels with Pallas](https://docs.jax.dev/en/latest/pallas/tpu/details.html)
-  The important one. Use for: VMEM budgeting, the pipelining model, why `index_map`
-  exists and what the hardware does with it.
+  The important one. Use for: lexicographic grid order, **the copy-skip statement**
+  ("when two consecutive grid indices use the same slice of an input, the HBM transfer
+  for the second iteration is skipped"), the reduction-on-last-axis rule, the `(8, 128)`
+  block rule, and the VMEM OOM failure mode. **Caveat:** carries no reviewed-date and
+  its "VMEM is 16MB+" is the v4 number — see the disagreement in
+  [research 0001](docs/research/0001-pallas-grid-blockspec-index-map.md).
+- [Software Pipelining](https://docs.jax.dev/en/latest/pallas/pipelining.html)
+  Platform-neutral. Use for: the derivation of the double-buffered loop, buffer-revisiting
+  hazards, and the accumulator pattern with a worked correct/incorrect pair.
+- [TPU Pipelining](https://docs.jax.dev/en/latest/pallas/tpu/pipelining.html)
+  Use for: the memory-space table, "pipelining is not allowed unless the `memory_space`
+  is marked as `VMEM`", default buffer count 2, and Megacore availability (v4/v5p only —
+  a no-op on our v5e). Reviewed 2024-04-08.
+- [Grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+  Use for: `index_map` returning *block* indices, the executable `slices_for_invocation`
+  definition, padding of non-dividing blocks, `None`/`Squeezed`. Reviewed 2024-06-01.
+- [TPU Hardware Reference](https://docs.jax.dev/en/latest/pallas/tpu/hardware.html)
+  Per-TensorCore VMEM/SMEM/HBM/peak-FLOPs by generation. Generated from
+  `jax/_src/pallas/mosaic/tpu_info.py`, so it is queryable offline via
+  `pltpu.get_tpu_info_for_chip` — the only primary source found that states v5e VMEM.
+- [Scalar Prefetch and Block-Sparse Computation](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html)
+  `PrefetchScalarGridSpec`. Phase 5 — how a data-dependent `index_map` expresses block
+  skipping. Do not read before Phase 5.
+- [Cloud TPU v5e](https://docs.cloud.google.com/tpu/docs/v5e)
+  The chip spec: 1 TensorCore, 16 GB HBM, 800 GiBps, 197 TFLOPs bf16. **Does not state
+  VMEM** — do not go looking there for it.
+
+### Workspace research
+
+- [research 0001 · Pallas grid, `BlockSpec`, `index_map`](docs/research/0001-pallas-grid-blockspec-index-map.md)
+  Primary-source findings behind lesson 03, with a verified/inferred split and four
+  documented disagreements inside the JAX tree. Use for: the copy-elision rule and the
+  interpret-mode experiments that demonstrate it.
 
 ## Wisdom (Communities)
 
@@ -63,13 +94,28 @@ parametric recall.
   TPU quota on it — e.g. [#36287](https://github.com/jax-ml/jax/issues/36287),
   already cited in the README.
 
-*No community preference recorded yet — ask before leaning on this section.*
+**Chosen community: [jax-ml/jax Discussions](https://github.com/jax-ml/jax/discussions)** — confirmed
+by Denis, session 3. Use it as the fallback authority when a question has no written
+answer in the docs or the source, and as the place to test a derivation against
+practitioners. Nothing has been posted yet.
 
 ## Gaps
 
 - **No trusted source found yet** for TPU v5e microarchitecture beyond the public
   spec sheet — MXU issue latency, VMEM banking, DMA granularity. Needed for Phase 6's
   roofline to explain gaps rather than just measure them.
-- **No worked Pallas tutorial** at the level of "here is why this `index_map` and not
-  that one". The `splash_attention` source is the closest thing, and it is production
-  code, not pedagogy.
+- ~~**No worked Pallas tutorial** at the level of "here is why this `index_map` and not
+  that one"~~ — closed by
+  [research 0001](docs/research/0001-pallas-grid-blockspec-index-map.md), which pins the
+  copy-elision rule to `tpu/details.html` and demonstrates it by execution.
+- **The default value of `--xla_tpu_scoped_vmem_limit_kib`** — not the physical 128 MiB,
+  is what a kernel actually gets. `pltpu.CompilerParams` proves the flag governs the
+  budget but never states its default. Not in the JAX Python tree.
+- **Whether copy elision is contractual on the hardware path.** The docs state it as a
+  property and two JAX-authored pipeline implementations honour it, but the `pallas_call`
+  pipeline on TPU is emitted by the Mosaic compiler, out of reach from Python. An xprof
+  DMA count on Colab would settle it — the highest-value single use of TPU time on this
+  topic. **First candidate for a jax-ml/jax Discussions post.**
+- **`RevisitMode.ANY`** — documented only in `jax/_src/pallas/core.py`, rejected by
+  lowering when `buffer_count > 1`, zero doc-page coverage. Possibly the escape hatch for
+  a shrunk grid whose output blocks are not visited consecutively; possibly a dead end.
