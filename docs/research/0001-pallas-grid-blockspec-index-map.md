@@ -360,15 +360,24 @@ varying   index_map  (lambda i: (i, 0)) -> [ 0.  0.  0.  0.]   # 4 DMAs, 0 reuse
 
 Identical under `interpret=True` and under `pltpu.InterpretParams()`.
 
-**Pitfall in this technique — added on independent re-verification.** A *constant*
-sentinel is only safe when each block is visited at most once, as above. Under interpret
-mode a write to an input ref **persists into the backing array**, so when a grid revisits
-a block, the copy is re-issued and brings the sentinel *back* — indistinguishable from
-elision. Re-running this probe with a constant `99.0` on the 12-step grid below reports
-`K: 4 DMAs`, which is wrong; the correct answer is 12. Use a **per-step** sentinel
-(`1000 + step`) and classify a read as `reuse` only when it equals the sentinel written
-at the *immediately preceding* step. Anything else is a copy, whether the source was
-clean or polluted.
+**Pitfall in this technique — added on independent re-verification, corrected in session 5.**
+A *constant* sentinel is only safe when each block is visited at most once, as above.
+Under **`interpret=True`** a write to an input ref **persists into the backing array**, so
+when a grid revisits a block, the copy is re-issued and brings the sentinel *back* —
+indistinguishable from elision. Re-running this probe with a constant `99.0` on the 12-step
+grid below reports `K: 4 DMAs` at `grid=(3,4)` and `Q: 3 DMAs` at `grid=(4,3)`; both are
+wrong, and the correct answer is 12 in each case. Note the shape of the error: the broken
+instrument launders **whichever operand is non-resident** into looking resident.
+
+**The two interpreters differ here, and the earlier text did not say so.** Under
+**`pltpu.InterpretParams()`** the store into the VMEM input buffer has nowhere to go — HBM
+and VMEM are modelled as separate memories connected only by simulated DMAs — so a
+re-fetched block arrives clean and even the constant sentinel gets the counts right on this
+grid. Do not rely on that: it is a property of this grid (no buffer rotation is exercised),
+not a property of the technique. Use a **per-step** sentinel (`1000 + step`) and classify a
+read as `reuse` only when it equals the sentinel written at the *immediately preceding*
+step. Anything else is a copy, whether the source was clean or polluted. That rule is the
+one thing that is correct under both interpreters.
 
 Scaling this up to an attention-shaped grid is where it earns its keep. Two operands,
 `grid=(3, 4)`, Q's `index_map` ignoring the fast axis and K's following it:
@@ -401,26 +410,42 @@ Same twelve grid steps, same block shapes, same arithmetic — **4× the Q traff
 entirely by which axis you put last. That is the answer to "why this `index_map` and not
 that one".
 
-**Independently re-verified** with the per-step-sentinel probe. The raw reads are more
-instructive than the counts, so they are recorded here verbatim (`0` = clean first copy
-of a block, `1000+n` = the sentinel step *n* wrote):
+**Independently re-verified** with the per-step-sentinel probe, twice — once in session 3
+and again in session 5. The raw reads are more instructive than the counts, so they are
+recorded here verbatim (`0` = clean first copy of a block, `1000+n` = the sentinel step *n*
+wrote). **These are the `interpret=True` traces**; the counts are identical under
+`pltpu.InterpretParams()` but the digits are not — see below.
 
 ```
-grid=(3,4)  i_q outer, j_kv fast
+grid=(3,4)  i_q outer, j_kv fast                                    [interpret=True]
   Q raw: [   0 1000 1001 1002    0 1004 1005 1006    0 1008 1009 1010]   ->  3 DMAs /  9 reuses
   K raw: [   0    0    0    0 1000 1001 1002 1003 1004 1005 1006 1007]   -> 12 DMAs /  0 reuses
 
-grid=(4,3)  j_kv outer, i_q fast
+grid=(4,3)  j_kv outer, i_q fast                                    [interpret=True]
   Q raw: [   0    0    0 1000 1001 1002 1003 1004 1005 1006 1007 1008]   -> 12 DMAs /  0 reuses
   K raw: [   0 1000 1001    0 1003 1004    0 1006 1007    0 1009 1010]   ->  4 DMAs /  8 reuses
 ```
 
-Read the Q row of the first block: `0` at steps 0, 4, 8 — a genuinely new Q block being
+Read the Q row of the first grid: `0` at steps 0, 4, 8 — a genuinely new Q block being
 fetched once per outer step — and an unbroken sentinel chain in between, the same VMEM
-buffer surviving three more steps. The K row of the first block is the opposite: four
-clean copies while the blocks are new, then from step 4 onward every read returns the
-sentinel from that block's *previous* visit, which is positive proof the copy was
-re-issued rather than elided.
+buffer surviving three more steps. The K row is the opposite: four clean copies while the
+blocks are new, then from step 4 onward every read returns the sentinel from that block's
+*previous* visit, carried back through the backing array. It is not the preceding step's
+sentinel, so the classifier calls it a copy — correctly.
+
+Under `pltpu.InterpretParams()` the **counts are the same** — `(3, 12)` and `(12, 4)` — but
+the non-resident operand's row is **all zeros** rather than a lagging sentinel chain,
+because the store into the VMEM buffer never reaches the backing array:
+
+```
+grid=(3,4)  K raw: [0 0 0 0 0 0 0 0 0 0 0 0]   -> 12 DMAs   [InterpretParams()]
+grid=(4,3)  Q raw: [0 0 0 0 0 0 0 0 0 0 0 0]   -> 12 DMAs   [InterpretParams()]
+```
+
+That is the cleaner evidence of the two: step *n−1* wrote a sentinel into its buffer and
+step *n* reads `0`, so a different buffer content demonstrably arrived. The resident
+operand's row is unchanged between the modes, which is the point — residency is real in
+both, and only the pollution artefact is mode-specific.
 
 ### 3.4 The rule as JAX implements it
 
@@ -1066,7 +1091,8 @@ from the snippets above. Run with
 | 1.3 | `"parallel"` reorders traversal | `InterpretParams(random_seed=...)` |
 | 3.1 | `index_map` returns block indices | `interpret=True` |
 | 3.3 | input copy elided iff block index unchanged | both modes, agreeing |
-| 3.3 | residency flips with grid axis order (3/12 vs 12/4 DMAs) | `InterpretParams()` |
+| 3.3 | residency flips with grid axis order (3/12 vs 12/4 DMAs) | both — counts agree, **raw traces do not** |
+| 3.3 | constant sentinel lies about the non-resident operand | `interpret=True` only |
 | 3.6 | accumulator correct only on the last grid axis | `interpret=True` |
 | 5.3 | padding on non-dividing blocks, NaN under interpret | `interpret=True` |
 | 5.4 | illegal `(3, 7)` block accepted on CPU | `interpret=True` |
