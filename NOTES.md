@@ -33,6 +33,15 @@
   with; the diverging case was the one the quiz turned on. A reimplementation that matches
   on your headline geometry is not validated.
 
+- **When there is no library to defer to, write the derivation twice and diff it.** Session
+  8's numbers exist only in this workspace, so `assets/roofline.js` (which counts DMAs by
+  running `PipelineGrid.trace`) and a scratch `roofline.py` (which imports `shapes.py` and
+  counts closed-form) were written independently and compared on FLOPs, bytes, steps and
+  computed-steps across 9 geometries × 3 kernels. The rule from session 7 — do not trust a
+  reimplementation that agrees on your headline geometry — applies to *your own* instrument
+  first. Sweep the controls too: every reachable combination should be finite, positive,
+  and fast enough to be interactive.
+
 ## Teaching notes
 
 - Denis reasons from primary sources and writes ADRs for his own decisions; the repo's
@@ -69,6 +78,15 @@
   interpret mode against a v5e correctly on request, then asserted an unverified claim about
   v5e memory paths unprompted. Ask for the caveat and it is there; the discipline is not yet
   automatic.
+- **Three lessons now stand unassessed — 04, 05, 06 — by his standing instruction to skip
+  assessments (sessions 7 and 8).** Gaps 1 and 4 stay formally open; lesson 05's three
+  spaced probes are unspent. This is his call and does not need relitigating, but the cost
+  compounds: the spaced probes were the cheap instrument, and they only work if answered.
+  If assessment resumes, lesson 06's Q1 and Q6 are the two worth grading first.
+- **`CONTEXT.md` gains *arithmetic intensity* and *ridge point* only after he demonstrates
+  them.** The glossary is the record of mastered vocabulary, not of taught vocabulary; it
+  already carries *Roofline* and the prefill/decode regime claims, which lesson 06 now
+  supplies the arithmetic for.
 - **Community: jax-ml/jax Discussions**, chosen session 3. Recorded in `RESOURCES.md`.
   The wisdom leg is still at zero — nothing posted. Two live candidates now: the standing
   copy-elision-on-hardware question, and (session 6, easier and sharper) the **block-shape
@@ -112,8 +130,32 @@
    assessments of gaps 1 and 4 and close them; if he skipped it, they stay open.**
    Lesson 05's own load-bearing question is Q1: the table buys the traffic, the shrink buys
    the steps.
-6. Roofline: which roof binds, and the arithmetic intensity that decides it (Phase 6).
-   Lesson 05 hands it a live number — block skipping cuts loads 4096 → 64 and compute
-   4096 → 127, i.e. by *different* factors, so it moves the arithmetic intensity.
+6. ~~Roofline: which roof binds, and the arithmetic intensity that decides it (Phase 6)~~
+   — lesson [`0006`](lessons/0006-the-roof-that-didnt-move.html), **delivered session 8,
+   not yet assessed.** Reference sheet:
+   [`roofline-and-arithmetic-intensity.html`](reference/roofline-and-arithmetic-intensity.html).
+   The lesson exists to *falsify* the prediction this entry used to carry (see the note
+   below). Its load-bearing question is Q1 — why skipping cannot change the regime — and
+   Q6 spaces lesson 03's which-axis-goes-last onto the head axis. Assess before Phase 7.
+7. Write the kernel. `src/` still holds only `shapes.py`; six lessons of predicates have
+   no `pl.pallas_call` behind them. Everything after this point is cheaper with a file to
+   point at, and the workspace's own rule — run the library's builder, not your model of
+   it — now applies to the kernel itself.
+
+## Corrections this workspace has made to itself
+
+- **Gap 6's own premise was wrong, and that became lesson 06.** The entry above used to
+  read: *block skipping cuts loads 4096 → 64 and compute 4096 → 127, by different factors,
+  so it moves the arithmetic intensity.* Those two numbers are K DMAs and live blocks —
+  a ratio between one operand's traffic and all of the compute. Counting **all four**
+  operands (Q and O do not shrink with the mask), bytes fall 32.50× against FLOPs' 32.25×:
+  intensity moves 504.1 → 508.0, **1.008×**, and the kernel stays compute-bound on both
+  sides. Block skipping is regime-preserving by construction — a dead block takes its load
+  and its compute away together. Generalise: *an intensity argument is only valid if every
+  operand is in the byte count.*
+- **`AI = W` was also wrong.** The plausible guess — that intensity tracks the sliding
+  window — survives a single geometry and dies under a sweep: intensity is flat in `W`
+  whenever `W ≤ B`. The closed form is `I = L·B/(R+k)`, which reduces to **≈ B**. A
+  hypothesis confirmed at one point is confirmed at one point.
 
 

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference · Roofline and arithmetic intensity</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Reference sheet</p>
+  <h1>Roofline and arithmetic intensity</h1>
+  <p class="standfirst">
+    Everything needed to say which roof binds a TPU v5e kernel, and the arithmetic to back it —
+    with the constants, their sources, and the disagreements between them.
+  </p>
+
+  <h2>The model</h2>
+
+  <div class="eq">
+    intensity <b>I</b> = FLOPs ÷ bytes moved to/from HBM<br>
+    attainable FLOP/s = min( <b>P</b>, &nbsp; I × <b>β</b> ) &nbsp;&nbsp;·&nbsp;&nbsp;
+    ridge <b>I*</b> = P ÷ β<br>
+    time floor = max( FLOPs ÷ P, &nbsp; bytes ÷ β )
+  </div>
+
+  <p>
+    <code>I &lt; I*</code> memory-bound · <code>I &gt; I*</code> compute-bound. Source:
+    <a href="https://www2.eecs.berkeley.edu/Pubs/TechRpts/2008/EECS-2008-134.html">Williams,
+    Waterman &amp; Patterson, UCB/EECS-2008-134, 2008</a>.
+  </p>
+
+  <p class="sidenote">
+    <b>I</b> is a property of the algorithm <i>and its schedule</i>; <b>I*</b> is a property of
+    the chip alone. Changing <code>BlockSpec</code>s changes <b>I</b>. That is the whole reason
+    a roofline is actionable rather than descriptive.
+  </p>
+
+  <h2>TPU v5e constants</h2>
+
+  <table>
+    <thead><tr><th>Quantity</th><th class="num">Value</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr class="highlight"><td>peak bf16 <b>P</b></td><td class="num">197 TFLOP/s</td><td>cloud docs + <code>tpu_info</code>, agree</td></tr>
+      <tr class="highlight"><td>HBM bandwidth <b>β</b></td><td class="num">820e9 B/s</td><td><code>tpu_info</code> — <i>use this one</i></td></tr>
+      <tr><td>β, repo</td><td class="num">819e9 B/s</td><td><a href="../src/gemma3_pallas/shapes.py">shapes.py</a></td></tr>
+      <tr><td>β, cloud docs literal</td><td class="num">858.99e9 B/s</td><td>&ldquo;800 GiBps&rdquo; — see the trap below</td></tr>
+      <tr><td>ridge <b>I*</b></td><td class="num">240.2</td><td>197e12 ÷ 820e9 &nbsp;·&nbsp; range <b>229–241</b></td></tr>
+      <tr><td>VMEM</td><td class="num">128 MiB</td><td><code>vmem_capacity_bytes</code></td></tr>
+      <tr><td>SMEM</td><td class="num">1 MiB</td><td><code>smem_capacity_bytes</code></td></tr>
+      <tr><td>HBM</td><td class="num">17.2e9 B = 16 GiB</td><td><code>hbm_capacity_bytes</code></td></tr>
+      <tr><td>MXUs × dim</td><td class="num">4 × 128</td><td><code>num_mxus</code>, <code>mxu_column_size</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="warn">
+    <span class="note-label">Trap · the bandwidth is not agreed</span>
+    <p><a href="https://docs.cloud.google.com/tpu/docs/v5e">Cloud TPU v5e</a> says
+    <b>800 GiBps</b>, which is 858.99e9 B/s — 4.8% above JAX's 820e9. The same table writes HBM
+    capacity as &ldquo;16 GB&rdquo; where <code>tpu_info</code> records 17,200,000,000 bytes,
+    i.e. 16 <i>GiB</i>, so its GB/GiB labelling is loose. <b>Take 820e9 and carry 229–241 as the
+    ridge's range.</b> Then check whether the range changes your answer — at any sane block size
+    it does not, and saying that is a stronger claim than quoting one constant.</p>
+  </div>
+
+  <h2>Both roofs, offline, in two lines</h2>
+
+  <pre><code>from jax._src.pallas.mosaic import tpu_info as ti
+ti.get_tpu_info_for_chip(ti.ChipVersion.TPU_V5E, 1)</code></pre>
+
+  <p>
+    Returns <code>bf16_ops_per_second</code>, <code>mem_bw_bytes_per_second</code>,
+    <code>vmem_capacity_bytes</code>, <code>smem_capacity_bytes</code>,
+    <code>hbm_capacity_bytes</code>, <code>num_mxus</code>, <code>mxu_column_size</code>,
+    <code>num_lanes</code>, <code>num_sublanes</code>. Chip versions are the
+    <code>ti.ChipVersion</code> enum (<code>TPU_V4</code> … <code>TPU_V6E</code>); the second
+    argument is TensorCores per logical device, 1 for v5e. No accelerator required — this is a
+    table in the JAX tree, not a device query.
+  </p>
+
+  <div class="note">
+    <span class="note-label">Mnemonic, not a derivation</span>
+    <p>4 MXUs × 128 × 128 × 2 FLOPs × 1.5 GHz ≈ 197 TFLOP/s, which is a useful way to remember
+    that <b>the compute roof assumes all four MXUs fed with 128-wide tiles every cycle</b>. Do
+    not promote it to a formula: the same arithmetic on v6e's table entries (2 MXUs × 256, 920
+    TFLOP/s) implies 3.5 GHz, which is not a real clock. The <i>assumption</i> is the part worth
+    keeping — it is <a href="block-shapes-and-vmem.html">the block-shape rule</a> wearing a
+    different hat.</p>
+  </div>
+
+  <h2>Counting an attention layer</h2>
+
+  <p>
+    Grid <code>(head, q_block, kv_block)</code>, kv innermost, bf16 operands, all four operand
+    blocks <code>(B × D)</code>. Let <code>R = N/B</code> query rows, <code>L</code> live blocks
+    per head, <code>k</code> K-DMAs per head after <a href="../lessons/0003-which-axis-goes-last.html">copy
+    elision</a>, <code>H</code> query heads, <code>D</code> = <code>head_dim</code>:
+  </p>
+
+  <div class="eq">
+    FLOPs = 4 · H·L · B² · D &nbsp;&nbsp;·&nbsp;&nbsp; bytes = 4H·(R + k) · B · D<br>
+    <b>I = L · B ÷ (R + k)</b>
+  </div>
+
+  <p class="sidenote">
+    <code>4H(R+k)</code> is Q read once per <code>(head, q_block)</code>, O written once, and
+    K and V fetched <code>k</code> times each per head — the head axis being outermost means
+    MQA's single KV head is streamed <code>H</code> times, not once.
+  </p>
+
+  <h3>The two closed forms worth remembering</h3>
+
+  <table>
+    <thead><tr><th>Phase</th><th class="num">intensity</th><th>because</th></tr></thead>
+    <tbody>
+      <tr class="highlight"><td>prefill, <code>W ≤ B</code></td><td class="num"><b>≈ B</b></td><td><code>L = 2R−1</code>, <code>k = R</code> ⟹ <code>I = B(2R−1)/2R</code></td></tr>
+      <tr class="highlight"><td>decode, MQA/GQA</td><td class="num"><b>= H</b></td><td><code>W</code> and <code>D</code> cancel; only the sharing ratio survives</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    So a prefill kernel's intensity is <b>the block size</b>, and a decode kernel's is <b>the
+    number of query heads per KV head</b>. Against a ridge of 240 that settles both cases
+    immediately: <code>B = 512</code> clears it 2.1×; <code>H = 4</code> misses it 60×.
+  </p>
+
+  <h2>Gemma 3 1B, one local layer, N = 32768, W = 512</h2>
+
+  <table>
+    <thead><tr><th class="num">B</th><th class="num">L</th><th class="num">k</th><th class="num">I</th><th>binds</th><th class="num">FLOPs</th><th class="num">bytes</th><th class="num">floor</th></tr></thead>
+    <tbody>
+      <tr><td class="num">128</td><td class="num">1,270</td><td class="num">1,269</td><td class="num">106.6</td><td>memory</td><td class="num">85.2 G</td><td class="num">762 MiB</td><td class="num">975 µs</td></tr>
+      <tr class="highlight"><td class="num">256</td><td class="num">381</td><td class="num">380</td><td class="num">192.0</td><td>memory</td><td class="num">102 G</td><td class="num">508 MiB</td><td class="num">650 µs</td></tr>
+      <tr><td class="num">512</td><td class="num">127</td><td class="num">64</td><td class="num">508.0</td><td>compute</td><td class="num">136 G</td><td class="num">256 MiB</td><td class="num">692 µs</td></tr>
+      <tr><td class="num">1024</td><td class="num">63</td><td class="num">32</td><td class="num">1,008</td><td>compute</td><td class="num">237 G</td><td class="num">224 MiB</td><td class="num">1.37 ms</td></tr>
+      <tr><td class="num">—</td><td class="num">dense grid</td><td class="num">4,096</td><td class="num">504.1</td><td>compute</td><td class="num">4.40 T</td><td class="num">8.12 GiB</td><td class="num">22.3 ms</td></tr>
+      <tr><td class="num">—</td><td class="num">decode step</td><td class="num">—</td><td class="num">3.97</td><td>memory</td><td class="num">2.10 M</td><td class="num">516 KiB</td><td class="num">0.6 µs</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>L</code> and <code>k</code> are per query head; FLOPs, bytes and floor are for all four.
+    Live-block counts agree with
+    <a href="block-skipping-arithmetic.html">block-skipping arithmetic</a>. The
+    <b>lowest floor is <code>B = 256</code>, and it is memory-bound</b> — smaller blocks buy
+    FLOPs and sell intensity, and only a roofline prices both in one unit.
+  </p>
+
+  <h2>Which roof binds — the checklist</h2>
+
+  <table>
+    <thead><tr><th class="num">#</th><th>Step</th><th>Trap</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>Count FLOPs at <i>block</i> granularity</td><td>the kernel computes whole blocks, not pairs</td></tr>
+      <tr><td class="num">2</td><td>Count HBM bytes for <b>every</b> operand</td><td>Q and O do not shrink with the mask</td></tr>
+      <tr><td class="num">3</td><td>Apply copy elision to get the DMA count</td><td>a repeat only elides if the indices are <i>consecutive</i></td></tr>
+      <tr><td class="num">4</td><td>I = FLOPs ÷ bytes; compare with I*</td><td>carry I*'s range, then check it does not matter</td></tr>
+      <tr><td class="num">5</td><td>Floor = max(FLOPs/P, bytes/β)</td><td>it is a lower bound, never an estimate</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What a roofline does not say</h2>
+
+  <table>
+    <thead><tr><th>It looks like it says</th><th>It actually says</th></tr></thead>
+    <tbody>
+      <tr><td>this kernel runs in 692 µs</td><td>nothing doing these FLOPs on this chip is faster</td></tr>
+      <tr><td>this optimisation is worthless</td><td>this optimisation does not change the <i>rate</i></td></tr>
+      <tr><td>higher intensity is better</td><td>higher intensity is better <i>only</i> below the ridge</td></tr>
+      <tr><td>VMEM pressure is accounted for</td><td>nothing that stays in VMEM appears here at all</td></tr>
+      <tr><td>the MXU is saturated</td><td>the roof assumes it; the model cannot check it</td></tr>
+    </tbody>
+  </table>
+
+  <div class="win">
+    <span class="note-label">The two invariances worth carrying to the next kernel</span>
+    <p><b>Block skipping cannot change which roof binds.</b> A dead block takes its load and its
+    compute away together, so FLOPs and bytes fall by the same factor and the ratio survives.
+    Skipping is worth 32× in <i>time</i> and 1.008× in intensity.</p>
+    <p><b>An optimisation that only cuts bytes buys nothing above the ridge.</b> Sharing MQA's KV
+    stream across heads lifts intensity 508 → 813 and moves the floor by zero microseconds,
+    because the compute roof was already binding. Check the regime before writing the
+    optimisation.</p>
+  </div>
+
+</article>
+
+<footer class="footer">
+  <p>
+    From <a href="../lessons/0006-the-roof-that-didnt-move.html">Lesson 06 · The roof that didn't
+    move</a>. Every number here is reproduced by
+    <a href="../assets/roofline.js">assets/roofline.js</a>, which derives its DMA counts from
+    <a href="../assets/pipeline-grid.js">pipeline-grid.js</a> rather than restating them.
+    Vocabulary per <a href="../CONTEXT.md">CONTEXT.md</a>.
+  </p>
+</footer>
+
+</body>
+</html>

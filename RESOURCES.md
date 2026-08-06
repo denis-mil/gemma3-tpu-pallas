@@ -39,6 +39,13 @@ parametric recall.
 - [`splash_attention_kernel.py`](https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/splash_attention/splash_attention_kernel.py)
   The ceiling. Use for: how block skipping is *actually* expressed on TPU — read its
   mask-processing code when Phase 5 starts, not before.
+- [Roofline: An Insightful Visual Performance Model for Floating-Point Programs and
+  Multicore Architectures](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2008/EECS-2008-134.html)
+  — Williams, Waterman & Patterson, UC Berkeley EECS-2008-134, 2008. **The origin of the
+  roofline**, and lesson 06's recommended reading. Use for: the model itself
+  (`min(peak, I × β)`), the ridge point, and — the part most summaries drop — the
+  *ceilings* below the roof, which are how the model explains a gap rather than merely
+  bounding it. Fetch the `.html` landing page; the PDF comes back as unparseable binary.
 - [Ragged Paged Attention (arXiv:2604.15464)](https://arxiv.org/abs/2604.15464)
   Current state of the art for TPU serving. Use for: context on where decode kernels
   are heading. Not needed for prefill.
@@ -66,8 +73,19 @@ parametric recall.
   definition, padding of non-dividing blocks, `None`/`Squeezed`. Reviewed 2024-06-01.
 - [TPU Hardware Reference](https://docs.jax.dev/en/latest/pallas/tpu/hardware.html)
   Per-TensorCore VMEM/SMEM/HBM/peak-FLOPs by generation. Generated from
-  `jax/_src/pallas/mosaic/tpu_info.py`, so it is queryable offline via
-  `pltpu.get_tpu_info_for_chip` — the only primary source found that states v5e VMEM.
+  `jax/_src/pallas/mosaic/tpu_info.py`, so it is queryable offline — the only primary
+  source found that states v5e VMEM. **The working call (session 8):**
+  ```python
+  from jax._src.pallas.mosaic import tpu_info as ti
+  ti.get_tpu_info_for_chip(ti.ChipVersion.TPU_V5E, 1)
+  ```
+  The re-export `pltpu.get_tpu_info_for_chip` takes the same two arguments, and the first
+  must be the `ti.ChipVersion` **enum member**, not the string `'v5e'` — a string fails
+  late and unhelpfully on `.is_lite`. Members are `TPU_V2 … TPU_V6E`, plus `TPU_7`,
+  `TPU_7X`, `TPU_8I`; the second argument is TensorCores per logical device, 1 for v5e.
+  Fields: `bf16_ops_per_second`, `mem_bw_bytes_per_second`, `vmem_capacity_bytes`,
+  `smem_capacity_bytes`, `hbm_capacity_bytes`, `num_mxus`, `mxu_column_size`,
+  `num_lanes`, `num_sublanes`.
 - [Scalar Prefetch and Block-Sparse Computation](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html)
   `PrefetchScalarGridSpec`. Phase 5 — how a data-dependent `index_map` expresses block
   skipping. **Gate opened session 7**; it is lesson 05's recommended reading. Use for: the
@@ -81,7 +99,12 @@ parametric recall.
   shrink_grid=...)` returns the tables directly, so it can be checked rather than read.
 - [Cloud TPU v5e](https://docs.cloud.google.com/tpu/docs/v5e)
   The chip spec: 1 TensorCore, 16 GB HBM, 800 GiBps, 197 TFLOPs bf16. **Does not state
-  VMEM** — do not go looking there for it.
+  VMEM** — do not go looking there for it. **Its bandwidth disagrees with JAX's** (session
+  8): 800 GiBps is 858.99e9 B/s against `tpu_info`'s 820e9, and the same table writes
+  "16 GB" for what `tpu_info` records as 17.2e9 bytes = 16 *GiB*, so its GB/GiB labelling
+  is demonstrably loose. Prefer `tpu_info`; `shapes.py`'s `819e9` is a third value and
+  agrees with neither. The resulting ridge point is 229–241 FLOPs/byte — carry the range,
+  then check whether it changes the answer.
 
 ### Workspace research
 
@@ -111,9 +134,14 @@ practitioners. Nothing has been posted yet.
 
 ## Gaps
 
-- **No trusted source found yet** for TPU v5e microarchitecture beyond the public
-  spec sheet — MXU issue latency, VMEM banking, DMA granularity. Needed for Phase 6's
-  roofline to explain gaps rather than just measure them.
+- **TPU v5e microarchitecture — now *partially* closed.** `tpu_info.py` supplies both
+  roofs (197 TFLOP/s, 820e9 B/s), VMEM 128 MiB, SMEM 1 MiB, HBM 16 GiB, and **4 MXUs of
+  128×128**, which is enough to place a kernel against the roofs and enough to state what
+  the compute roof assumes. Still missing, and still needed to *explain* a gap rather than
+  bound it: **MXU issue latency, VMEM banking, DMA granularity** — i.e. everything that
+  would let a ceiling be drawn below the roof. Do not try to back out a clock from
+  `peak / (num_mxus · dim² · 2)`: it gives a clean 1.5 GHz on v5e and an impossible
+  3.5 GHz on v6e, so it is a mnemonic, not a derivation.
 - ~~**No worked Pallas tutorial** at the level of "here is why this `index_map` and not
   that one"~~ — closed by
   [research 0001](docs/research/0001-pallas-grid-blockspec-index-map.md), which pins the

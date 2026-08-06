@@ -441,6 +441,42 @@ table.st-cmp { margin: 0; font-size: 0.78rem; }
 table.st-cmp td:first-child { color: var(--ink); }
 table.st-cmp th { font-size: 0.64rem; }
 
+/* ---- roofline.js ---- */
+
+.rf-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0.2rem 0 0.5rem;
+}
+.rf-grid { stroke: var(--rule); stroke-width: 1; }
+.rf-axis { stroke: var(--ink-muted); stroke-width: 1; }
+.rf-band { fill: var(--accent-soft); }
+.rf-roof-off { stroke: var(--dead); stroke-width: 1; fill: none; }
+.rf-envelope { stroke: var(--accent); stroke-width: 2; fill: none; stroke-linejoin: round; }
+.rf-drop { stroke: var(--rule); stroke-width: 1; }
+
+.rf-mark { cursor: pointer; }
+.rf-hit { fill: transparent; }
+.rf-dot { fill: var(--accent); stroke: var(--paper); stroke-width: 2; }
+.rf-mark:hover .rf-dot, .rf-mark:focus .rf-dot { fill: var(--ink); }
+.rf-mark:focus { outline: none; }
+
+.rf-tick, .rf-anno, .rf-label, .rf-axis-label {
+  font-family: var(--mono);
+  fill: var(--ink-muted);
+}
+.rf-tick { font-size: 10px; font-variant-numeric: tabular-nums; }
+.rf-anno { font-size: 9.5px; }
+.rf-axis-label { font-size: 10px; }
+.rf-label { font-size: 10.5px; font-weight: 600; fill: var(--ink); }
+.rf-mid { text-anchor: middle; }
+.rf-end { text-anchor: end; }
+
+table.rf-tab { margin: 0; font-size: 0.78rem; }
+table.rf-tab th { font-size: 0.64rem; }
+table.rf-tab td:first-child { color: var(--ink); }
+
 /* ---- quiz ---- */
 
 .q { margin-bottom: 1.7rem; }
