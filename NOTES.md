@@ -9,6 +9,12 @@
 - Lessons link the shared stylesheet at `assets/lesson.css`. Use classic `<script src>`
   tags, never `type="module"` — ES modules and `fetch` are blocked under `file://`,
   and these pages are opened from disk.
+- **The lessons are published over GitHub Pages** (from `main` at the repo root, with
+  `.nojekyll`; commit `2d2c3e7`). Two consequences for every new page: links to `.md` and
+  `.py` files must be **absolute `github.com/.../blob/main/...` URLs** — a relative one
+  downloads raw text under Pages — while links to `.html` and `../assets/` stay relative so
+  the pages still open from disk. And **`index.html` at the root is the landing page**; a
+  new lesson or reference sheet is not shipped until it is listed there with a standfirst.
 - **Vary the quiz answer position.** Lesson 03 shipped with all six answers at index 0.
   `quiz.js` deliberately does not shuffle, on the grounds that a deliberate order carries
   no signal — but a *constant* one does, and it is the kind of thing he would spot and
@@ -57,9 +63,10 @@
   way: the abstract "why is it only two comparisons" failed twice, a tile with real
   integers landed on the first try. Lesson 0001 did it the other way round. See
   [`0002`](learning-records/0002-tile-predicate-derives-under-concrete-instance.md).
-- **Assess with instances the reference sheet cannot answer.** Given an abstract prompt he
+- **Question with instances the reference sheet cannot answer.** Given an abstract prompt he
   will produce the formula verbatim from `reference/` — fluency, not storage. Concrete
-  numbers close that door.
+  numbers close that door. Now a rule for quiz stems, since the quiz is the only instrument
+  left — see the standing instruction below.
 - **Prefer break-it questions to recall-it questions.** Session 4: asked to swap the
   running max for a running minimum and report the damage, he produced a sharper statement
   of the invariant than lesson 0002 contains. A reference sheet lists what the algorithm
@@ -78,11 +85,22 @@
   interpret mode against a v5e correctly on request, then asserted an unverified claim about
   v5e memory paths unprompted. Ask for the caveat and it is there; the discipline is not yet
   automatic.
-- **Three lessons now stand unassessed — 04, 05, 06 — by his standing instruction to skip
-  assessments (sessions 7 and 8).** Gaps 1 and 4 stay formally open; lesson 05's three
-  spaced probes are unspent. This is his call and does not need relitigating, but the cost
-  compounds: the spaced probes were the cheap instrument, and they only work if answered.
-  If assessment resumes, lesson 06's Q1 and Q6 are the two worth grading first.
+- **No post-lesson assessments. Settled, session 8 — do not offer one, do not open a
+  session with one, do not restate the cost.** Skipped in sessions 7 and 8 and then ruled
+  out explicitly. Consequences, recorded once and not to be repeated at him: lessons 04,
+  05 and 06 are unassessed, gaps 1 and 4 stay formally open, and lesson 05's three spaced
+  probes are unspent. **The in-lesson quiz is the only instrument left**, so it now carries
+  the whole diagnostic load — keep seeding prior-lesson probes into it (spacing is the one
+  technique that has worked on him twice) and keep preferring break-it questions, because
+  those are what a reference sheet cannot answer. Learning records go on documenting what a
+  lesson *taught*, not what he demonstrated.
+- **The project is kernel-led from session 10 on. Decided session 9.** Lessons are no
+  longer scheduled off the gap list; they get written when writing a kernel produces real
+  friction, and are named after the thing that bit him. Learning records continue as before.
+  Two costs he took on knowingly: fewer lessons, and therefore fewer firings of the
+  in-lesson quiz, which the no-assessment rule has already left as the only diagnostic
+  instrument. Consequence for lesson design — when a lesson *is* earned it should carry
+  **more** spaced probes than before, not fewer, because the next one may be further away.
 - **`CONTEXT.md` gains *arithmetic intensity* and *ridge point* only after he demonstrates
   them.** The glossary is the record of mastered vocabulary, not of taught vocabulary; it
   already carries *Roofline* and the prefill/decode regime claims, which lesson 06 now
@@ -115,32 +133,45 @@
    discriminator note below.
 4. ~~Block shapes and the VMEM budget: why `(8, 128)`, and what double buffering costs~~
    — lesson [`0004`](lessons/0004-two-rules-your-cpu-wont-enforce.html), **delivered
-   session 6, not yet assessed.** Reference sheet:
-   [`block-shapes-and-vmem.html`](reference/block-shapes-and-vmem.html). Assess before
-   opening gap 5. Two things to probe: whether he reaches for the *regime* (linear vs
+   session 6, unassessed and staying that way.** Reference sheet:
+   [`block-shapes-and-vmem.html`](reference/block-shapes-and-vmem.html). Two things still
+   worth spacing into a later quiz: whether he reaches for the *regime* (linear vs
    quadratic) rather than the 4 MiB total, and whether the discriminator question (Q2,
-   "what has a clean interpret-mode run established") sticks outside the quiz.
+   "what has a clean interpret-mode run established") holds up when re-asked.
 5. ~~`index_map` and shrunk grids — where lesson 0001's predicate becomes code (Phase 5)~~
-   — lesson [`0005`](lessons/0005-the-index-map-that-lies.html), **delivered session 7, not
-   yet assessed.** Reference sheet:
+   — lesson [`0005`](lessons/0005-the-index-map-that-lies.html), **delivered session 7,
+   unassessed and staying that way.** Reference sheet:
    [`scalar-prefetch-and-shrunk-grids.html`](reference/scalar-prefetch-and-shrunk-grids.html).
-   Its quiz carries three spaced probes rather than a separate assessment: gap 4's *regime*
-   question (Q5), gap 4's *discriminator* question (Q4), and gap 1's residual — `full` as a
-   relation distinct from `live` (Q3). **If he answered the quiz, grade those three as the
-   assessments of gaps 1 and 4 and close them; if he skipped it, they stay open.**
+   Its quiz carries three spaced probes: gap 4's *regime* question (Q5), gap 4's
+   *discriminator* question (Q4), and gap 1's residual — `full` as a relation distinct from
+   `live` (Q3). Those three are unspent unless he worked the quiz.
    Lesson 05's own load-bearing question is Q1: the table buys the traffic, the shrink buys
    the steps.
 6. ~~Roofline: which roof binds, and the arithmetic intensity that decides it (Phase 6)~~
    — lesson [`0006`](lessons/0006-the-roof-that-didnt-move.html), **delivered session 8,
-   not yet assessed.** Reference sheet:
+   unassessed and staying that way.** Reference sheet:
    [`roofline-and-arithmetic-intensity.html`](reference/roofline-and-arithmetic-intensity.html).
    The lesson exists to *falsify* the prediction this entry used to carry (see the note
    below). Its load-bearing question is Q1 — why skipping cannot change the regime — and
-   Q6 spaces lesson 03's which-axis-goes-last onto the head axis. Assess before Phase 7.
-7. Write the kernel. `src/` still holds only `shapes.py`; six lessons of predicates have
-   no `pl.pallas_call` behind them. Everything after this point is cheaper with a file to
-   point at, and the workspace's own rule — run the library's builder, not your model of
-   it — now applies to the kernel itself.
+   Q6 spaces lesson 03's which-axis-goes-last onto the head axis.
+7. Write the kernel. Six lessons of predicates have no `pl.pallas_call` behind them — the
+   only one in the repo is in [`tests/test_pallas_smoke.py`](tests/test_pallas_smoke.py),
+   and `src/` has none. But `src/` is not bare: alongside `shapes.py` it holds
+   [`reference.py`](src/gemma3_pallas/reference.py), the fp32 ground truth every kernel is
+   asserted against (`gated_mlp`, `attention_mask`, `attention`). This is a blank kernel
+   file, not a blank slate — the oracle is already committed, which is what makes TDD the
+   right shape for it.
+
+   **Decided session 9: start at README Phase 2 — the fused gated-MLP, test-first against
+   `reference.gated_mlp` under interpret mode.** Phase 2 before Phase 3 for two reasons.
+   It is the first blank-file kernel, so it should exercise grid, `BlockSpec`, `index_map`
+   and the VMEM budget with no online-softmax carry state to debug at the same time. And
+   its operands are *weights*, not activations: `1152 × 6912` in bf16 is 15.2 MiB per
+   matrix, 45.6 MiB for all three, ~91 MiB double-buffered — close enough to the contested
+   VMEM figure in [`block-shapes-and-vmem.html`](reference/block-shapes-and-vmem.html) that
+   the block decomposition is a decision he has to make rather than an exercise he can skip.
+   The workspace's own rule — run the library's builder, not your model of it — now applies
+   to the kernel itself.
 
 ## Corrections this workspace has made to itself
 
