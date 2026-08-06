@@ -68,7 +68,7 @@ kernel(*prefetch_refs, *input_refs, *output_refs, *scratch_refs)</code></pre>
     should be specified for those arguments."
     (<a href="https://docs.jax.dev/en/latest/pallas/tpu/sparse.html">sparse.html</a>). SMEM,
     not VMEM, because this is control data — the
-    <a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">§6.2</a> rule of thumb.
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/research/0001-pallas-grid-blockspec-index-map.md">§6.2</a> rule of thumb.
   </p>
 
   <h2>2 · The table is lesson 01's predicate, compiled</h2>
@@ -323,7 +323,7 @@ grid       = (num_q_heads, q_seq_len // bq, grid_width)</code></pre>
   <h3>Read this next</h3>
   <p>
     <a href="https://docs.jax.dev/en/latest/pallas/tpu/sparse.html">Scalar Prefetch and
-    Block-Sparse Computation</a> — the page <a href="../RESOURCES.md">RESOURCES.md</a> has been
+    Block-Sparse Computation</a> — the page <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/RESOURCES.md">RESOURCES.md</a> has been
     holding back until this phase. It builds the same idea from the other end: a block-sparse
     matmul rather than attention, small enough to read in one sitting, and its worked example
     is the minimal version of everything above. Then, if you want the argument for <i>why</i>
@@ -336,13 +336,13 @@ grid       = (num_q_heads, q_seq_len // bq, grid_width)</code></pre>
   <ul>
     <li><a href="../reference/scalar-prefetch-and-shrunk-grids.html">Reference · Scalar prefetch and shrunk grids</a> — the compressed version, with the table constructions and the kernel skeleton</li>
     <li><a href="../reference/block-skipping-arithmetic.html">Reference · Block-skipping arithmetic</a> — the predicate this lesson compiles into a table</li>
-    <li><a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — §3.2 is the elision rule, §6.3 scalar prefetch, §7 the splash_attention read-through</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — §3.2 is the elision rule, §6.3 scalar prefetch, §7 the splash_attention read-through</li>
     <li><a href="0004-two-rules-your-cpu-wont-enforce.html">Lesson 04 · Two rules your CPU won't enforce</a></li>
     <li><a href="0003-which-axis-goes-last.html">Lesson 03 · Which axis goes last</a> — the elision rule this lesson is entirely made of</li>
     <li><a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02 · The normaliser you don't have yet</a></li>
     <li><a href="0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a work map</a> — the predicate, five sessions later</li>
-    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
-    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/MISSION.md">MISSION.md</a> — why any of this is being learned</li>
   </ul>
 
   <h3>Where this goes</h3>
@@ -363,7 +363,7 @@ grid       = (num_q_heads, q_seq_len // bq, grid_width)</code></pre>
     busiest row's live count, accepting a wrong answer for one row; and what
     <code>RevisitMode.ANY</code> is <i>for</i>, since a shrunk grid — the obvious candidate —
     turns out not to need it. That last one is still an open gap in
-    <a href="../RESOURCES.md">RESOURCES.md</a> and is now the best-posed question this
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/RESOURCES.md">RESOURCES.md</a> and is now the best-posed question this
     workspace has for <a href="https://github.com/jax-ml/jax/discussions">jax-ml/jax
     Discussions</a> after the block-shape ambiguity.
   </div>
@@ -420,7 +420,7 @@ Quiz.mount('#quiz', {
                 'that Mosaic honours its documented rule',
                 'that windowing beats causality on chip'],
       answer: 1,
-      why: 'It establishes that <i>this</i> table, fed to <i>this</i> <code>index_map</code>, produces the intended block-visit sequence, and that the documented elision rule applied to that sequence yields four — in the two implementations exercised, both of which are CPU interpreters. It says nothing about a v5e, where the pipeline is emitted by Mosaic and whether elision is contractual on that path is still an <a href="../RESOURCES.md">open gap</a>. Two interpreters agreeing is not a quorum when neither is the thing you will ship on. <b>Name the instrument, then state the boundary — the same discipline the mission asks for on a roofline, applied to your own measurement.</b>'
+      why: 'It establishes that <i>this</i> table, fed to <i>this</i> <code>index_map</code>, produces the intended block-visit sequence, and that the documented elision rule applied to that sequence yields four — in the two implementations exercised, both of which are CPU interpreters. It says nothing about a v5e, where the pipeline is emitted by Mosaic and whether elision is contractual on that path is still an <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/RESOURCES.md">open gap</a>. Two interpreters agreeing is not a quorum when neither is the thing you will ship on. <b>Name the instrument, then state the boundary — the same discipline the mission asks for on a roofline, applied to your own measurement.</b>'
     },
     {
       stem: 'Now that the grid is shrunk, you wonder whether to raise <code>bq = bkv</code> from 512 to 2048 and cut the step count further. Lesson 04 costed the 512 case at 4 MiB of VMEM. What is the right <i>first</i> thing to work out?',

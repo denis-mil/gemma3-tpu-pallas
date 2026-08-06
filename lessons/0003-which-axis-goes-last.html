@@ -220,7 +220,7 @@
   <p class="sidenote">
     Both predicates are visible in JAX source, in two independent implementations that
     agree — the interpreter and <code>pltpu.emit_pipeline</code>. See
-    <a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">research 0001 §3.4</a>.
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/research/0001-pallas-grid-blockspec-index-map.md">research 0001 §3.4</a>.
   </p>
 
   <p>
@@ -297,13 +297,13 @@
 
   <h3>Elsewhere in this workspace</h3>
   <ul>
-    <li><a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — every claim above, with its source, plus the experiments that produced the numbers</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — every claim above, with its source, plus the experiments that produced the numbers</li>
     <li><a href="../reference/online-softmax.html">Reference · Online softmax</a> — the accumulators §5 is about</li>
     <li><a href="../reference/block-skipping-arithmetic.html">Reference · Block-skipping arithmetic</a> — which tiles the grid should be walking at all</li>
     <li><a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02 · The normaliser you don't have yet</a></li>
     <li><a href="0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a work map</a></li>
-    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
-    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/MISSION.md">MISSION.md</a> — why any of this is being learned</li>
   </ul>
 
   <h3>Where this goes</h3>
@@ -318,7 +318,7 @@
     After that, Phase 5: this grid is still walking <i>every</i> kv block. Lesson 01 said
     most of them are dead. Making the grid skip them is where the mask predicate finally
     becomes an <code>index_map</code> — and per
-    <a href="../docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a>,
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a>,
     that ordering is deliberate.
   </p>
 

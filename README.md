@@ -6,6 +6,10 @@ shapes [Gemma 3 1B](https://huggingface.co/google/gemma-3-1b-it) runs, on a sing
 **Status: scaffolding and references complete. No kernel is written yet.** The roadmap below
 is a plan, not a claim.
 
+📖 **[Lessons and reference sheets →](https://denis-mil.github.io/gemma3-tpu-pallas/)** — six
+lessons deriving the windowed-attention kernel from first principles, plus five reference sheets.
+Interactive; read them in a browser rather than as source.
+
 ## The idea
 
 Gemma 3 interleaves **local** and **global** attention layers. In the 1B model, 22 of 26 layers are

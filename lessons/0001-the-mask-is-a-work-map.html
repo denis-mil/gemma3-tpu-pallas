@@ -18,7 +18,7 @@
   </p>
 
   <p>
-    Your <a href="../README.md">README</a> makes a claim: at a 32K prompt, a local layer
+    Your <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/README.md">README</a> makes a claim: at a 32K prompt, a local layer
     computes about 64× more score pairs than it keeps. That number is correct, and by the
     end of this lesson you will be able to derive it — but deriving it is not the skill.
     The skill is the step after it, because <b>a kernel cannot skip a pair. It can only
@@ -36,7 +36,7 @@
     multiplied by <code>V</code>. Attention is two matmuls with a softmax between them —
     <code>QK<sup>T</sup></code> produces the scores, PV consumes them. Both are per query
     head, both cost <code>2·N·S·D</code> FLOPs, which is why
-    <a href="../src/gemma3_pallas/shapes.py">shapes.py</a> charges
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/src/gemma3_pallas/shapes.py">shapes.py</a> charges
     <code>4·pairs·head_dim</code> for the pair — a 2 for each matmul.</p>
   </div>
 
@@ -71,7 +71,7 @@
 
   <p>
     The README's 64× is the first row, and it is the right one to quote, because
-    <a href="../CONTEXT.md">the naive baseline</a> is defined as materialising the full
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">the naive baseline</a> is defined as materialising the full
     score matrix and <i>then</i> masking. But notice what just happened: half of that 64×
     is causality, which every attention kernel already exploits. <b>Windowing's own
     contribution is 32×, not 64×.</b> Quote the number, but know which part of it your
@@ -88,7 +88,7 @@
 
   <ul>
     <li><b>dead</b> — the mask forbids every pair in it. Never load it. This is
-      <a href="../CONTEXT.md">block skipping</a>.</li>
+      <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">block skipping</a>.</li>
     <li><b>partial</b> — some pairs allowed, some not. Load it, then apply an elementwise
       mask, exactly as the naive baseline would.</li>
     <li><b>full</b> — every pair allowed. Load it and skip the masking entirely.</li>
@@ -125,7 +125,7 @@
     <span class="note-label">Verified, not asserted</span>
     <p>This predicate was checked exhaustively against
     <code>reference.attention_mask()</code> in
-    <a href="../src/gemma3_pallas/reference.py">reference.py</a> — 16,464 tiles across
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/src/gemma3_pallas/reference.py">reference.py</a> — 16,464 tiles across
     every combination of <code>N ∈ {512, 1024, 2048}</code>,
     <code>W ∈ {128, 256, 512, ∞}</code> and block sizes <code>{64, 128, 256}</code>.
     Zero mismatches.</p>
@@ -164,7 +164,7 @@
     All at <code>N = 32768</code>, <code>W = 512</code>. Choosing <code>B = W = 512</code>
     — the obvious, tidy choice — makes your kernel load <b>twice</b> the KV it strictly
     needs. Choosing <code>B = 128</code> cuts that to 1.25×, but 128 is the
-    <a href="../src/gemma3_pallas/shapes.py">v5e MXU dimension</a>, so tiles stop
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/src/gemma3_pallas/shapes.py">v5e MXU dimension</a>, so tiles stop
     amortising and the grid grows 16-fold in steps.
   </p>
 
@@ -203,9 +203,9 @@
   <h3>Elsewhere in this workspace</h3>
   <ul>
     <li><a href="../reference/block-skipping-arithmetic.html">Reference · Block-skipping arithmetic</a> — the predicate, the counts and the formulas, on one printable page</li>
-    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary: <i>local layer</i>, <i>window</i>, <i>block skipping</i>, <i>naive baseline</i></li>
-    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
-    <li><a href="../docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a> — why windowed prefill, and not the other three candidates</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a> — canonical vocabulary: <i>local layer</i>, <i>window</i>, <i>block skipping</i>, <i>naive baseline</i></li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a> — why windowed prefill, and not the other three candidates</li>
   </ul>
 
   <h3>Where this goes</h3>

@@ -45,7 +45,7 @@
     <tbody>
       <tr class="highlight"><td>peak bf16 <b>P</b></td><td class="num">197 TFLOP/s</td><td>cloud docs + <code>tpu_info</code>, agree</td></tr>
       <tr class="highlight"><td>HBM bandwidth <b>β</b></td><td class="num">820e9 B/s</td><td><code>tpu_info</code> — <i>use this one</i></td></tr>
-      <tr><td>β, repo</td><td class="num">819e9 B/s</td><td><a href="../src/gemma3_pallas/shapes.py">shapes.py</a></td></tr>
+      <tr><td>β, repo</td><td class="num">819e9 B/s</td><td><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/src/gemma3_pallas/shapes.py">shapes.py</a></td></tr>
       <tr><td>β, cloud docs literal</td><td class="num">858.99e9 B/s</td><td>&ldquo;800 GiBps&rdquo; — see the trap below</td></tr>
       <tr><td>ridge <b>I*</b></td><td class="num">240.2</td><td>197e12 ÷ 820e9 &nbsp;·&nbsp; range <b>229–241</b></td></tr>
       <tr><td>VMEM</td><td class="num">128 MiB</td><td><code>vmem_capacity_bytes</code></td></tr>
@@ -193,7 +193,7 @@ ti.get_tpu_info_for_chip(ti.ChipVersion.TPU_V5E, 1)</code></pre>
     move</a>. Every number here is reproduced by
     <a href="../assets/roofline.js">assets/roofline.js</a>, which derives its DMA counts from
     <a href="../assets/pipeline-grid.js">pipeline-grid.js</a> rather than restating them.
-    Vocabulary per <a href="../CONTEXT.md">CONTEXT.md</a>.
+    Vocabulary per <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a>.
   </p>
 </footer>
 

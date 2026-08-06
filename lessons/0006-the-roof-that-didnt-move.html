@@ -21,7 +21,7 @@
 
   <p>
     You can now write the kernel. What you cannot yet do is the thing
-    <a href="../MISSION.md">MISSION.md</a> asks for last: <i>read a roofline and state which roof
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/MISSION.md">MISSION.md</a> asks for last: <i>read a roofline and state which roof
     binds, with the arithmetic to back it</i>. That is two hardware constants, one ratio, and a
     habit — and the habit is the part that transfers.
   </p>
@@ -59,7 +59,7 @@
     <thead><tr><th>Source</th><th class="num">B/s</th><th class="num">ridge</th></tr></thead>
     <tbody>
       <tr class="highlight"><td><code>jax/_src/pallas/mosaic/tpu_info.py</code></td><td class="num">820e9</td><td class="num">240.2</td></tr>
-      <tr><td><a href="../src/gemma3_pallas/shapes.py"><code>shapes.py</code></a></td><td class="num">819e9</td><td class="num">240.5</td></tr>
+      <tr><td><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/src/gemma3_pallas/shapes.py"><code>shapes.py</code></a></td><td class="num">819e9</td><td class="num">240.5</td></tr>
       <tr><td>cloud docs, &ldquo;800 GiBps&rdquo; read literally</td><td class="num">858.99e9</td><td class="num">229.3</td></tr>
     </tbody>
   </table>
@@ -237,7 +237,7 @@ bytes = (copies issued) · block · head_dim · 2</code></pre>
   <h2>6 · Decode, in one line</h2>
 
   <p>
-    <a href="../CONTEXT.md">CONTEXT.md</a> has asserted since before lesson 01 that prefill is
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a> has asserted since before lesson 01 that prefill is
     compute-bound and decode is bandwidth-bound. Here is the arithmetic it was standing on. One
     decode step, one local layer: one query row against <code>W</code> cached keys.
   </p>
@@ -279,7 +279,7 @@ bytes = (copies issued) · block · head_dim · 2</code></pre>
     <li><b>The DMA counts are interpret-mode counts.</b> They come from
       <a href="0003-which-axis-goes-last.html">lesson 03</a>'s documented elision rule applied to
       a step sequence, verified under two CPU interpreters. Whether Mosaic honours that rule on
-      the hardware path is still an <a href="../RESOURCES.md">open gap</a> — and if it does not,
+      the hardware path is still an <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/RESOURCES.md">open gap</a> — and if it does not,
       every byte count here is a floor too.</li>
     <li><b>The ridge is 229–241, not 240.</b> Three published bandwidths, 4.9% apart. It changes
       no conclusion in this lesson, which is a thing you can only say <i>after</i> checking.</li>
@@ -323,17 +323,17 @@ bytes = (copies issued) · block · head_dim · 2</code></pre>
     <li><a href="0003-which-axis-goes-last.html">Lesson 03 · Which axis goes last</a> — every DMA count here is its rule, executed</li>
     <li><a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02 · The normaliser you don't have yet</a></li>
     <li><a href="0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a work map</a></li>
-    <li><a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a></li>
-    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
-    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a></li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/MISSION.md">MISSION.md</a> — why any of this is being learned</li>
   </ul>
 
   <h3>Where this goes</h3>
   <p>
-    That is the last of the five things <a href="../MISSION.md">MISSION.md</a> asks for that can
+    That is the last of the five things <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/MISSION.md">MISSION.md</a> asks for that can
     be learned without writing the kernel. The sixth — <i>explaining the remaining gap to
     <code>splash_attention</code> in mechanistic terms</i> — cannot, because a gap needs two
-    things to measure between, and <a href="../src/gemma3_pallas/">src/</a> still has no kernel
+    things to measure between, and <a href="https://github.com/denis-mil/gemma3-tpu-pallas/tree/main/src/gemma3_pallas">src/</a> still has no kernel
     in it. Every ingredient now exists: the predicate, the recurrence, the axis order, the block
     budget, the tables, and a floor to check the result against. <b>The next session should write
     the file.</b>

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gemma3-tpu-pallas · Lessons and reference sheets</title>
+<link rel="stylesheet" href="assets/lesson.css">
+<style>
+  /* index-only: the contents list. Everything else comes from lesson.css. */
+
+  .toc { list-style: none; padding: 0; margin: 0; counter-reset: none; }
+
+  .toc li {
+    padding: 1.1rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .toc li:first-child { border-top: 1px solid var(--rule); }
+
+  .toc a.title {
+    font-size: 1.15rem;
+    text-decoration-thickness: 1px;
+    display: inline-block;
+    margin-bottom: 0.25rem;
+  }
+
+  .toc .num {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    display: block;
+    margin-bottom: 0.3rem;
+  }
+
+  .toc .blurb {
+    margin: 0;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--ink-muted);
+  }
+
+  .lede { font-size: 1.02rem; }
+</style>
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">gemma3-tpu-pallas · Teaching workspace</p>
+  <h1>Windowed attention on a TPU, worked out from first principles</h1>
+  <p class="standfirst">
+    Six lessons and five reference sheets on writing a Pallas attention kernel for
+    Gemma 3 1B — derived at the shapes the model actually runs, on a single TPU v5e.
+  </p>
+
+  <p class="lede">
+    Gemma 3 interleaves <b>local</b> and <b>global</b> attention layers: 22 of the 1B model's
+    26 layers see only a 512-token window. At a 32K prompt a local layer computes about
+    <b>64× more score pairs than it keeps</b>, so the interesting kernel is not one that
+    masks that work away but one that never loads it. Everything here is an attempt to
+    say precisely which tiles those are, and what refusing them is worth.
+  </p>
+
+  <div class="note">
+    <span class="note-label">Status</span>
+    <p>Scaffolding, arithmetic and references are complete — <b>no kernel is written yet</b>.
+    The numbers below are derived and, where a CPU can check them, tested; none has run on a
+    chip. Each page names its instrument before it states a boundary.
+    Source: <a href="https://github.com/denis-mil/gemma3-tpu-pallas">github.com/denis-mil/gemma3-tpu-pallas</a>.</p>
+  </div>
+
+  <h2>Lessons</h2>
+
+  <p>Read in order — each one leaves a debt the next collects.</p>
+
+  <ol class="toc">
+    <li>
+      <span class="num">Lesson 01 · Windowed prefill</span>
+      <a class="title" href="lessons/0001-the-mask-is-a-work-map.html">The mask is a work map</a>
+      <p class="blurb">
+        A mask tells you which scores to throw away. Read it one tile at a time and it
+        tells you something far more useful: which memory you never had to load.
+      </p>
+    </li>
+    <li>
+      <span class="num">Lesson 02 · Windowed prefill</span>
+      <a class="title" href="lessons/0002-the-normaliser-you-dont-have-yet.html">The normaliser you don't have yet</a>
+      <p class="blurb">
+        Softmax needs a denominator over every score. A flash kernel only ever holds one
+        tile of them. The fix is not an approximation — it is an accumulator you are
+        allowed to correct after the fact.
+      </p>
+    </li>
+    <li>
+      <span class="num">Lesson 03 · Windowed prefill</span>
+      <a class="title" href="lessons/0003-which-axis-goes-last.html">Which axis goes last</a>
+      <p class="blurb">
+        Two nested loops, same twelve steps, same arithmetic. Order them one way and you
+        move three blocks of queries. Order them the other way and you move twelve.
+        Nothing in the kernel body changed.
+      </p>
+    </li>
+    <li>
+      <span class="num">Lesson 04 · Windowed prefill</span>
+      <a class="title" href="lessons/0004-two-rules-your-cpu-wont-enforce.html">Two rules your CPU won't enforce</a>
+      <p class="blurb">
+        Lesson 03 took <code>(8, 128)</code> on faith and never asked whether the blocks
+        fit. Both debts come due here — and both are checks that your only available
+        machine will silently decline to make.
+      </p>
+    </li>
+    <li>
+      <span class="num">Lesson 05 · Windowed prefill</span>
+      <a class="title" href="lessons/0005-the-index-map-that-lies.html">The <code>index_map</code> that lies</a>
+      <p class="blurb">
+        Lesson 01 derived which tiles a windowed kernel may refuse to load. Four lessons
+        later that predicate has still never run. This is where it becomes code — and the
+        machinery it needs turns out to be machinery you already have.
+      </p>
+    </li>
+    <li>
+      <span class="num">Lesson 06 · Windowed prefill</span>
+      <a class="title" href="lessons/0006-the-roof-that-didnt-move.html">The roof that didn't move</a>
+      <p class="blurb">
+        Lesson 05 ended with a prediction: block skipping cuts loads and compute by
+        different factors, so it should move the kernel from one roof to the other. This
+        lesson works out the arithmetic. <b>The prediction is wrong</b> — and the reason it
+        is wrong is worth more than the roofline itself.
+      </p>
+    </li>
+  </ol>
+
+  <h2>Reference sheets</h2>
+
+  <p>
+    The formulas, constants and failure modes, stripped of the derivations. Written to be
+    returned to rather than read through.
+  </p>
+
+  <ul class="toc">
+    <li>
+      <span class="num">Reference sheet</span>
+      <a class="title" href="reference/block-skipping-arithmetic.html">Block-skipping arithmetic</a>
+      <p class="blurb">
+        Everything needed to decide, at trace time, which tiles a windowed attention kernel
+        must load — and how much it costs to get the block size wrong.
+      </p>
+    </li>
+    <li>
+      <span class="num">Reference sheet</span>
+      <a class="title" href="reference/online-softmax.html">Online softmax</a>
+      <p class="blurb">
+        Computing an exact softmax in one pass, holding one tile of scores at a time — the
+        recurrence, the invariant that tests it, and the four ways it goes wrong.
+      </p>
+    </li>
+    <li>
+      <span class="num">Reference sheet</span>
+      <a class="title" href="reference/block-shapes-and-vmem.html">Block shapes and the VMEM budget</a>
+      <p class="blurb">
+        How big a block may be, and whether it fits — the two checks Mosaic makes at compile
+        time and no CPU makes at all. Apply both by hand, before you burn TPU quota.
+      </p>
+    </li>
+    <li>
+      <span class="num">Reference sheet</span>
+      <a class="title" href="reference/scalar-prefetch-and-shrunk-grids.html">Scalar prefetch and shrunk grids</a>
+      <p class="blurb">
+        How a mask predicate becomes an <code>index_map</code>. The API, the two table
+        constructions, the kernel skeleton, and the numbers each half actually buys.
+      </p>
+    </li>
+    <li>
+      <span class="num">Reference sheet</span>
+      <a class="title" href="reference/roofline-and-arithmetic-intensity.html">Roofline and arithmetic intensity</a>
+      <p class="blurb">
+        Everything needed to say which roof binds a TPU v5e kernel, and the arithmetic to
+        back it — with the constants, their sources, and the disagreements between them.
+      </p>
+    </li>
+  </ul>
+
+</article>
+
+<footer class="footer">
+  <p>
+    Every page here is interactive — the diagrams redraw and the quizzes score, so give the
+    widgets a click rather than reading past them.
+  </p>
+  <p>
+    Source, benchmarks and the research notes behind the numbers:
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas">denis-mil/gemma3-tpu-pallas</a>.
+    Start with <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/README.md">README.md</a>
+    for the architecture and the roadmap,
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a>
+    for the vocabulary these lessons assume.
+  </p>
+</footer>
+
+</body>
+</html>

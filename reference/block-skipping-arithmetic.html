@@ -20,7 +20,7 @@
   <h2>Mask conventions</h2>
 
   <p>
-    As implemented in <a href="../src/gemma3_pallas/reference.py">reference.py</a>.
+    As implemented in <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/src/gemma3_pallas/reference.py">reference.py</a>.
     Query <code>q</code>, key <code>k</code>, window <code>W</code>:
   </p>
 
@@ -153,7 +153,7 @@
   <p>
     Layer <code>i</code> is global iff <code>(i+1) % 6 == 0</code>. Source:
     <a href="https://huggingface.co/google/gemma-3-1b-it/blob/main/config.json"><code>gemma-3-1b-it/config.json</code></a>,
-    mirrored in <a href="../src/gemma3_pallas/shapes.py">shapes.py</a>.
+    mirrored in <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/src/gemma3_pallas/shapes.py">shapes.py</a>.
   </p>
 
   <div class="note">
@@ -173,7 +173,7 @@
   <p>
     Two matmuls per pair — <code>QK<sup>T</sup></code> and <b>PV</b> (the post-softmax
     probabilities times <code>V</code>) — at <code>2·D</code> FLOPs each. Matches
-    <code>attention_flops()</code> in <a href="../src/gemma3_pallas/shapes.py">shapes.py</a>.
+    <code>attention_flops()</code> in <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/src/gemma3_pallas/shapes.py">shapes.py</a>.
   </p>
 
 </article>
@@ -181,7 +181,7 @@
 <footer class="footer">
   <p>
     From <a href="../lessons/0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a
-    work map</a>. Vocabulary per <a href="../CONTEXT.md">CONTEXT.md</a>.
+    work map</a>. Vocabulary per <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a>.
   </p>
 </footer>
 

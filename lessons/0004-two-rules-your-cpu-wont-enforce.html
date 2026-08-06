@@ -40,7 +40,7 @@
 
   <p>
     That third column is why this is one lesson and not two. Your workflow is
-    <a href="../MISSION.md">develop on CPU under interpret mode, validate on scarce Colab
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/MISSION.md">develop on CPU under interpret mode, validate on scarce Colab
     TPU time</a>. Both of these rules are invisible from the first half of it, so both have
     to be applied by hand, at authoring time, by you. What follows is how.
   </p>
@@ -242,7 +242,7 @@
     <li><b>A whole-array operand counts once too.</b> When a block covers the entire array
       and its <code>index_map</code> returns literal zeros, lowering forces single
       buffering — there is no next slice to prefetch.
-      (<a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001
+      (<a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001
       §2.3</a>, from <code>lowering.py</code>.)</li>
     <li><b>The score tile is in the budget.</b> It never appears in a <code>BlockSpec</code>,
       because it is an intermediate — but <code>details.rst</code> names "space necessary to
@@ -331,7 +331,7 @@
     <code>--xla_tpu_scoped_vmem_limit_kib=N</code> flag" — so the effective budget is an
     <b>XLA scoped limit</b>, not the physical capacity. The default value of that flag is not
     stated anywhere in the JAX Python tree. It is an open gap in
-    <a href="../RESOURCES.md">RESOURCES.md</a>, and it is the number a real out-of-memory
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/RESOURCES.md">RESOURCES.md</a>, and it is the number a real out-of-memory
     error would be measured against.</p>
   </div>
 
@@ -416,12 +416,12 @@
   <h3>Elsewhere in this workspace</h3>
   <ul>
     <li><a href="../reference/block-shapes-and-vmem.html">Reference · Block shapes and the VMEM budget</a> — the compressed version of this lesson, for when you are actually writing a <code>BlockSpec</code></li>
-    <li><a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — §4 and §5 are this lesson's sources, with the verified/inferred split</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — §4 and §5 are this lesson's sources, with the verified/inferred split</li>
     <li><a href="0003-which-axis-goes-last.html">Lesson 03 · Which axis goes last</a> — where double buffering was introduced without its price tag</li>
     <li><a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02 · The normaliser you don't have yet</a> — the accumulators that §4 budgets for</li>
     <li><a href="0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a work map</a></li>
-    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
-    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
+    <li><a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/MISSION.md">MISSION.md</a> — why any of this is being learned</li>
   </ul>
 
   <h3>Where this goes</h3>
@@ -433,7 +433,7 @@
     where the mask predicate finally becomes an <code>index_map</code> — and the mechanism
     turns out not to be new machinery at all, but lesson 03's copy elision driven by a
     prefetched table. Per
-    <a href="../docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a>,
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/adr/0001-windowed-prefill-as-the-optimisation-target.md">ADR-0001</a>,
     that ordering is deliberate.
   </p>
 
