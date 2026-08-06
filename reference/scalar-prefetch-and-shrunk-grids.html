@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference · Scalar prefetch and shrunk grids</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Reference sheet</p>
+  <h1>Scalar prefetch and shrunk grids</h1>
+  <p class="standfirst">
+    How a mask predicate becomes an <code>index_map</code>. The API, the two table
+    constructions, the kernel skeleton, and the numbers each half actually buys.
+  </p>
+
+  <div class="note">
+    <span class="note-label">The one-line version</span>
+    <p><b>Block skipping is copy elision driven by a table.</b> No new pipeline, no sparse grid
+    type. An <code>index_map</code> reads a prefetched SMEM table and returns the same block
+    index twice in a row; the consecutive-index elision rule does the rest.</p>
+  </div>
+
+  <h2>API</h2>
+
+  <p>Replace <code>grid=</code> with <code>grid_spec=</code>. Prefetched arrays go to SMEM
+  before the pipeline starts and take <b>no <code>BlockSpec</code></b>.</p>
+
+  <pre><code>grid_spec = pltpu.PrefetchScalarGridSpec(
+    num_scalar_prefetch=2,          <span class="dim"># first 2 call args -&gt; SMEM</span>
+    grid=(n_q, grid_width),
+    in_specs=[pl.BlockSpec((bq,  head_dim), q_map),
+              pl.BlockSpec((bkv, head_dim), kv_map),
+              pl.BlockSpec((bkv, head_dim), kv_map)],
+    out_specs=pl.BlockSpec((bq, head_dim), q_map))
+
+pl.pallas_call(kernel, grid_spec=grid_spec, out_shape=…)(
+    kv_next, run, q, k, v)         <span class="dim"># prefetch args first</span></code></pre>
+
+  <p><b>Argument order is fixed</b> in both signatures — get it wrong and the failure is a
+  shape error a long way from the cause:</p>
+
+  <div class="eq">
+    index_map(*grid_indices, *prefetch_refs)<br>
+    kernel(*prefetch_refs, *input_refs, *output_refs, *scratch_refs)
+  </div>
+
+  <pre><code>def q_map(i, j, kv_next_ref, run_ref):
+    del j, kv_next_ref, run_ref          <span class="dim"># ignores the fast axis -&gt; resident</span>
+    return (i, 0)
+
+def kv_map(i, j, kv_next_ref, run_ref):
+    del run_ref
+    return (kv_next_ref[i, j], 0)        <span class="dim"># the lie</span></code></pre>
+
+  <h2>The two tables</h2>
+
+  <p>
+    Names and semantics are <code>splash_attention</code>'s
+    (<code>splash_attention_mask_info.py</code>, <code>MaskInfo</code>). Both are
+    <code>[heads_or_shards, n_q, grid_width]</code> integers.
+  </p>
+
+  <table>
+    <thead><tr><th>Table</th><th>Entry</th><th>Read by</th></tr></thead>
+    <tbody>
+      <tr><td><code>block_mask</code></td><td><b>0</b> dead · <b>1</b> partial · <b>2</b> full</td><td>the kernel body</td></tr>
+      <tr><td><code>data_next</code></td><td>which kv block this step fetches</td><td>the <code>index_map</code></td></tr>
+      <tr><td><code>mask_next</code></td><td>index into <code>partial_mask_blocks</code></td><td>the kernel body</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    <code>block_mask</code> <b>is lesson 01's trichotomy</b>. Same three states, same two
+    consequences — see
+    <a href="block-skipping-arithmetic.html">Block-skipping arithmetic</a>.
+  </p>
+
+  <div class="eq">
+    0 &rarr; <b>do not fetch, do not compute</b> &nbsp;·&nbsp;
+    1 &rarr; fetch, compute, <b>mask elementwise</b> &nbsp;·&nbsp;
+    2 &rarr; fetch, compute, <b>skip the mask</b>
+  </div>
+
+  <pre><code>is_nonzero      = block_mask_ref[h, i, j] &gt; 0    <span class="dim"># should_run</span>
+should_not_mask = block_mask_ref[h, i, j] != 1   <span class="dim"># it is a 2</span>
+next_j          = data_next_ref[h, i, j]</code></pre>
+
+  <p class="sidenote">
+    <code>_next_nonzero</code>, <code>splash_attention_kernel.py</code>. Construction is
+    <code>block_mask = where(is_full, 2, where(is_empty, 0, 1))</code> in
+    <code>splash_attention_mask_info.py</code>, computed host-side from the materialised mask
+    with <code>.all()</code> and <code>.any()</code> per block.
+  </p>
+
+  <h3>data_next, unshrunk</h3>
+  <p>At column <code>j</code>: the next live column <b>at or after</b> <code>j</code>; if there
+  is none, the last live column at or before it. Dead columns therefore repeat a neighbour's
+  index, and the copy is elided.</p>
+
+  <h3>data_next, shrunk</h3>
+  <p>Per row, left-pack the live columns; pad every row out to
+  <code>grid_width = max live per row</code> — "this avoids having jagged rows". <b>Padding
+  entries are index 0 with <code>block_mask = 0</code></b>, not a repeat of the previous index.
+  So a padded step still resolves an <code>index_map</code> and may cost a transfer.</p>
+
+  <div class="eq">
+    grid_width = fwd_mask_info.data_next.shape[-1]<br>
+    grid = (num_q_heads, q_seq_len // bq, grid_width)
+  </div>
+
+  <h2>Kernel skeleton</h2>
+
+  <pre><code>def kernel(kv_next_ref, run_ref, q_ref, k_ref, v_ref, o_ref):
+    i, j = pl.program_id(0), pl.program_id(1)
+
+    @pl.when(j == 0)                          <span class="dim"># first inner step: initialise</span>
+    def _():
+        o_ref[...] = jnp.zeros_like(o_ref)
+
+    @pl.when(run_ref[i, j] == 1)              <span class="dim"># dead / padded steps do nothing</span>
+    def _():
+        kv = kv_next_ref[i, j]                <span class="dim"># positions must come from the TABLE,</span>
+        …                                     <span class="dim"># not from j — j is a lie now</span>
+        o_ref[...] += …</code></pre>
+
+  <div class="warn">
+    <span class="note-label">The trap</span>
+    <p>Once <code>index_map</code> lies about <code>j</code>, <b>every use of <code>j</code> as
+    a position is wrong</b>. The elementwise mask needs real key indices, and those are
+    <code>data_next[i][j] * bkv + iota</code>, never <code>j * bkv + iota</code>. This is the
+    error that produces a kernel which is fast, runs clean, and is silently wrong for exactly
+    the rows the window clips.</p>
+  </div>
+
+  <h2>What each half buys</h2>
+
+  <p><code>N = 2048</code>, <code>W = 512</code>, <code>B = 512</code>. Measured under both
+  interpreters with a per-step sentinel probe.</p>
+
+  <table>
+    <thead><tr><th><code>index_map</code></th><th class="num">grid</th><th class="num">steps</th><th class="num">computed</th><th class="num">K DMAs</th></tr></thead>
+    <tbody>
+      <tr><td>returns <code>j</code></td><td class="num">(4, 4)</td><td class="num">16</td><td class="num">16</td><td class="num">16</td></tr>
+      <tr><td><code>data_next</code>, full grid</td><td class="num">(4, 4)</td><td class="num">16</td><td class="num">7</td><td class="num">4</td></tr>
+      <tr class="highlight"><td><code>data_next</code>, shrunk</td><td class="num">(4, 2)</td><td class="num">8</td><td class="num">7</td><td class="num">4</td></tr>
+    </tbody>
+  </table>
+
+  <div class="eq">
+    the <b>table</b> buys the traffic &nbsp;·&nbsp; the <b>shrink</b> buys the steps
+  </div>
+
+  <h2>The load-once property, and its precondition</h2>
+
+  <p>
+    When <code>W ≤ bkv</code> each row's live set is <code>{i−1, i}</code>, the flattened kv
+    index sequence never decreases, elision <b>crosses the row boundary</b>, and every kv block
+    is loaded <b>exactly once for the whole layer</b>. This is a property of the geometry, not
+    of block skipping.
+  </p>
+
+  <table>
+    <thead><tr><th class="num">N</th><th class="num">W</th><th class="num">B</th><th class="num">grid</th><th class="num">steps</th><th class="num">computed</th><th class="num">K DMAs</th><th class="num">kv blocks</th></tr></thead>
+    <tbody>
+      <tr class="highlight"><td class="num">2048</td><td class="num">512</td><td class="num">512</td><td class="num">(4, 2)</td><td class="num">8</td><td class="num">7</td><td class="num">4</td><td class="num">4</td></tr>
+      <tr><td class="num">2048</td><td class="num">1024</td><td class="num">512</td><td class="num">(4, 3)</td><td class="num">12</td><td class="num">9</td><td class="num">8</td><td class="num">4</td></tr>
+      <tr><td class="num">2048</td><td class="num">512</td><td class="num">256</td><td class="num">(8, 3)</td><td class="num">24</td><td class="num">21</td><td class="num">20</td><td class="num">8</td></tr>
+      <tr class="highlight"><td class="num">32768</td><td class="num">512</td><td class="num">512</td><td class="num">(64, 2)</td><td class="num">128</td><td class="num">127</td><td class="num">64</td><td class="num">64</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Row 2: widening the window past the block breaks the ordering — the sequence steps
+    backwards at each row boundary. Row 3: <b>halving <code>B</code> costs 20 loads for 8
+    blocks.</b> The counting sheet already said halving <code>B</code> quadruples the grid; it
+    also destroys the load-once property.
+  </p>
+
+  <p>
+    Row 4 checks against session 1's arithmetic: live tiles
+    <code>R·m − m(m−1)/2 = 64·2 − 1 = 127</code>, and the kernel computes 127. The spare step
+    is row 0's padding.
+  </p>
+
+  <h2>Invariants worth checking</h2>
+
+  <ul>
+    <li><b>Output revisits stay consecutive.</b> Shrinking removes steps inside a row and never
+      permutes <code>i</code>, so an output block is revisited <code>grid_width</code> times in
+      a row. Lesson 03's accumulator rule survives; <code>RevisitMode.ANY</code> is not needed.</li>
+    <li><b><code>o_ref</code> is not the accumulator</b> in <code>splash_attention</code>. The
+      running sum is <code>o_scratch</code> at f32, rescaled each step; <code>o_ref</code> takes
+      one store on the last inner step, normalised and cast. Residency is spent on skipping
+      write-backs, not on accumulating.</li>
+    <li><b>Block skipping never removes the mask.</b> At <code>W = B</code> there are no
+      <code>2</code>s at all — no <code>W</code>-wide block fits inside a <code>W</code>-wide
+      band — so every loaded block is masked elementwise.</li>
+    <li><b>Nothing here is evidence about a v5e.</b> The counts are from CPU interpreters.
+      Whether elision is contractual on the Mosaic path is an open gap in
+      <a href="../RESOURCES.md">RESOURCES.md</a>.</li>
+  </ul>
+
+</article>
+
+<footer class="footer">
+  <p>
+    From <a href="../lessons/0005-the-index-map-that-lies.html">Lesson 05 · The index_map that
+    lies</a>. Sources:
+    <a href="https://docs.jax.dev/en/latest/pallas/tpu/sparse.html">Scalar Prefetch and
+    Block-Sparse Computation</a>,
+    <code>splash_attention_kernel.py</code>, <code>splash_attention_mask_info.py</code>, and
+    <a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">research 0001</a> §3.2,
+    §6.3, §7. Vocabulary per <a href="../CONTEXT.md">CONTEXT.md</a>.
+  </p>
+</footer>
+
+</body>
+</html>

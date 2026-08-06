@@ -70,7 +70,15 @@ parametric recall.
   `pltpu.get_tpu_info_for_chip` — the only primary source found that states v5e VMEM.
 - [Scalar Prefetch and Block-Sparse Computation](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html)
   `PrefetchScalarGridSpec`. Phase 5 — how a data-dependent `index_map` expresses block
-  skipping. Do not read before Phase 5.
+  skipping. **Gate opened session 7**; it is lesson 05's recommended reading. Use for: the
+  fixed argument order of `index_map` and `kernel` under scalar prefetch, and the
+  block-sparse matmul worked example.
+- [`splash_attention_mask_info.py`](https://github.com/jax-ml/jax/blob/main/jax/experimental/pallas/ops/tpu/splash_attention/splash_attention_mask_info.py)
+  Where the prefetch tables are actually built. Use for: `MaskInfo`'s docstring (the
+  `block_mask` 0/1/2 encoding, which is lesson 01's dead/partial/full), and
+  `_shrink_mask_info` (grid shrinking, and the fact that padding entries are index **0**
+  rather than a repeat). Importable and runnable on CPU: `process_mask(mask, (bq, bkv),
+  shrink_grid=...)` returns the tables directly, so it can be checked rather than read.
 - [Cloud TPU v5e](https://docs.cloud.google.com/tpu/docs/v5e)
   The chip spec: 1 TensorCore, 16 GB HBM, 800 GiBps, 197 TFLOPs bf16. **Does not state
   VMEM** — do not go looking there for it.
@@ -119,8 +127,13 @@ practitioners. Nothing has been posted yet.
   DMA count on Colab would settle it — the highest-value single use of TPU time on this
   topic. **First candidate for a jax-ml/jax Discussions post.**
 - **`RevisitMode.ANY`** — documented only in `jax/_src/pallas/core.py`, rejected by
-  lowering when `buffer_count > 1`, zero doc-page coverage. Possibly the escape hatch for
-  a shrunk grid whose output blocks are not visited consecutively; possibly a dead end.
+  lowering when `buffer_count > 1`, zero doc-page coverage. **Session 7 removed its most
+  likely motivation without finding a replacement:** a shrunk grid does *not* need it,
+  because shrinking removes steps from inside a row and never permutes the outer index, so
+  output revisits stay consecutive — confirmed by an accumulating shrunk-grid kernel
+  matching a dense reference to `8.7e-7` under both interpreters. So the question is now
+  sharper rather than closed: *what grid shape is it for?* That well-posedness makes it the
+  best jax-ml/jax Discussions candidate after the block-shape ambiguity.
 - **Which reading of the `(8, 128)` block-shape rule Mosaic implements.** "The last two
   dimensions … must be equal to the respective dimension of the overall array, or be
   divisible by 8 and 128 respectively" is ambiguous between a per-axis and a paired

@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 05 · The index_map that lies</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<article class="lesson">
+
+  <p class="eyebrow">Lesson 05 · Windowed prefill</p>
+  <h1>The <code>index_map</code> that lies</h1>
+  <p class="standfirst">
+    <a href="0001-the-mask-is-a-work-map.html">Lesson 01</a> derived which tiles a windowed
+    kernel may refuse to load. Four lessons later that predicate has still never run. This is
+    where it becomes code — and the machinery it needs turns out to be machinery you already
+    have.
+  </p>
+
+  <p>
+    You can now write a <code>BlockSpec</code> and defend it: which axis goes last
+    (<a href="0003-which-axis-goes-last.html">03</a>), how big the block may be and whether it
+    fits (<a href="0004-two-rules-your-cpu-wont-enforce.html">04</a>). What none of it can do
+    is <b>decline a block</b>. The grid walks every kv tile, including the ones lesson 01
+    proved were dead. At Gemma 3 1B's full context that is 4096 grid steps to do 127 tiles of
+    real work.
+  </p>
+
+  <div class="win">
+    <span class="note-label">The thesis</span>
+    <p><b>Block skipping is not a mechanism. It is <a href="0003-which-axis-goes-last.html">copy
+    elision</a> driven by a table.</b> There is no <code>skip=True</code> flag, no sparse
+    grid type, no new pipeline. There is an <code>index_map</code> that returns the same block
+    index twice in a row on purpose, and the rule you already learned in lesson 03 does the
+    rest.</p>
+  </div>
+
+  <h2>1 · Getting a table in before the pipeline starts</h2>
+
+  <p>
+    An <code>index_map</code> runs at trace time, before any data exists in VMEM. So it cannot
+    read K to decide which K to fetch — that is the chicken-and-egg problem that makes
+    data-dependent indexing look impossible. Pallas breaks it with one escape hatch:
+  </p>
+
+  <blockquote>
+    Scalar prefetch allows you to pass in a small amount of data into SMEM ("scalar memory")
+    that is loaded <b>before the start of the pipeline</b> ("prefetch"). Because this data is
+    loaded before the pipeline, it is available for use in the <code>index_map</code> for each
+    BlockSpec, allowing you to perform <b>data-dependent indexing calculations</b>.
+    <cite>— <a href="https://docs.jax.dev/en/latest/pallas/tpu/sparse.html">Scalar Prefetch and Block-Sparse Computation</a></cite>
+  </blockquote>
+
+  <p>
+    Three mechanical facts, and they are the whole API. Swap <code>grid=</code> for a
+    <code>grid_spec=</code>; the prefetched arguments come first and get no
+    <code>BlockSpec</code>; and both signatures gain them, in a fixed order:
+  </p>
+
+  <pre><code>index_map(*grid_indices, *prefetch_refs)
+kernel(*prefetch_refs, *input_refs, *output_refs, *scratch_refs)</code></pre>
+
+  <p class="sidenote">
+    "If <code>num_scalar_prefetch</code> is <code>n</code>, then the first <code>n</code>
+    arguments to <code>pallas_call</code> will be placed in SMEM. No <code>BlockSpec</code>s
+    should be specified for those arguments."
+    (<a href="https://docs.jax.dev/en/latest/pallas/tpu/sparse.html">sparse.html</a>). SMEM,
+    not VMEM, because this is control data — the
+    <a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">§6.2</a> rule of thumb.
+  </p>
+
+  <h2>2 · The table is lesson 01's predicate, compiled</h2>
+
+  <p>
+    Now the interesting part, which is not the API. <b>What goes in the table?</b>
+  </p>
+
+  <p>
+    <code>splash_attention</code> prefetches three arrays. Two of them matter here, and their
+    definitions come straight out of the library's own docstring:
+  </p>
+
+  <blockquote>
+    <code>data_next</code>: … each entry contains the next <code>kv</code> block index to
+    prefetch.<br>
+    <code>block_mask</code>: … entries can be 0, 1 or 2. An entry of <b>0</b> indicates that
+    the corresponding block in the full mask was all zeros. An entry of <b>1</b> indicates
+    that the corresponding block contained both zeros and ones. An entry of <b>2</b>
+    indicates the corresponding block was entirely ones.
+    <cite>— <code>splash_attention_mask_info.py</code>, <code>MaskInfo</code></cite>
+  </blockquote>
+
+  <div class="win">
+    <span class="note-label">The win</span>
+    <p><b>That is lesson 01's trichotomy, verbatim, as an integer in SMEM.</b> All zeros is
+    <i>dead</i>; both zeros and ones is <i>partial</i>; entirely ones is <i>full</i>. The
+    <a href="../reference/block-skipping-arithmetic.html">reference sheet</a> you wrote in
+    session 1 has the same three rows and the same two consequences — dead means do not load,
+    full means do not mask. Google's production kernel encodes it as <code>0</code>,
+    <code>1</code>, <code>2</code>. You derived the classification before you knew what it was
+    for; this is what it was for.</p>
+  </div>
+
+  <p>
+    And the kernel spends it exactly where you would predict. One helper reads all three
+    tables and returns the block index plus two booleans:
+  </p>
+
+  <pre><code>is_nonzero      = block_mask_ref[h, i, j] &gt; 0      <span class="dim"># should_run</span>
+should_not_mask = block_mask_ref[h, i, j] != 1     <span class="dim"># i.e. it is 2, a full block</span>
+next_j          = data_next_ref[h, i, j]           <span class="dim"># which kv block to fetch</span></code></pre>
+
+  <p class="sidenote">
+    <code>_next_nonzero</code>, <code>splash_attention_kernel.py</code>. <code>next_j</code>
+    is what <code>k_index_map</code> and <code>v_index_map</code> return;
+    <code>is_nonzero</code> gates the compute; <code>should_not_mask</code> is passed to
+    <code>_apply_mask_and_soft_cap</code>, which then skips the elementwise
+    <code>jnp.where</code> entirely.
+  </p>
+
+  <p>
+    So <code>0</code> saves a fetch <i>and</i> a matmul, and <code>2</code> saves a mask pass.
+    <b>Two different savings from one table</b>, which is why the classification has three
+    values and not two.
+  </p>
+
+  <h2>3 · Shrink the grid</h2>
+
+  <p>
+    Now the second half. Row <i>i</i> of the mask has at most <i>m</i> live blocks — for
+    Gemma's local layers with <code>bkv = W = 512</code>, that is two. Carrying a grid axis of
+    length <code>kv_len / bkv</code> to run two useful steps is waste that no amount of copy
+    elision removes, because <b>the step still executes</b>. So make the axis as wide as the
+    busiest row and left-pack each row's live blocks into it:
+  </p>
+
+  <pre><code>grid_width = fwd_mask_info.data_next.shape[-1]
+grid       = (num_q_heads, q_seq_len // bq, grid_width)</code></pre>
+
+  <p class="sidenote">
+    <code>splash_attention_kernel.py</code>. The shrink itself is
+    <code>_shrink_mask_info</code> in <code>splash_attention_mask_info.py</code>: per row,
+    take the non-zero columns, then "pad each row … to match the width of the longest row.
+    <b>This avoids having jagged rows.</b>" A grid is a rectangle; that constraint never went
+    away.
+  </p>
+
+  <p>
+    Turn the shrink off and on. The tables below are built here in the browser from lesson
+    01's predicate, and they reproduce
+    <code>process_mask(…, shrink_grid=…)</code>'s output exactly:
+  </p>
+
+  <div id="skip"></div>
+
+  <p class="sidenote">
+    Verified rather than asserted: the widget's <code>grid_width</code>, K DMA count and
+    computed-step count were checked against the library's own tables at nine
+    <code>(N, W, B)</code> geometries, with the DMA counts measured by running a Pallas kernel
+    under both interpreters. Zero mismatches.
+  </p>
+
+  <h2>4 · Which half bought what</h2>
+
+  <p>
+    Read the three rows of that widget again at the default settings, because the difference
+    between the last two is the thing most people get wrong:
+  </p>
+
+  <table>
+    <thead><tr><th><code>index_map</code></th><th class="num">grid</th><th class="num">steps</th><th class="num">computed</th><th class="num">K DMAs</th></tr></thead>
+    <tbody>
+      <tr><td>returns <code>j</code></td><td class="num">(4, 4)</td><td class="num">16</td><td class="num">16</td><td class="num">16</td></tr>
+      <tr><td>returns <code>data_next[i][j]</code></td><td class="num">(4, 4)</td><td class="num">16</td><td class="num">7</td><td class="num">4</td></tr>
+      <tr class="highlight"><td>same, shrunk axis</td><td class="num">(4, 2)</td><td class="num">8</td><td class="num">7</td><td class="num">4</td></tr>
+    </tbody>
+  </table>
+
+  <div class="win">
+    <span class="note-label">The discriminator</span>
+    <p><b>The table buys the traffic. The shrink buys the steps.</b> They are two independent
+    optimisations that happen to arrive together, and either works without the other. Wire the
+    table into <code>index_map</code> on a full rectangular grid and KV traffic already falls
+    16 → 4, because dead columns resolve to a neighbour's block index and lesson 03's rule
+    elides the copy — but you still execute sixteen steps. Shrink the axis and the eight dead
+    steps go, while the traffic does not move at all. If you can only say "block skipping made
+    it faster", you cannot debug it when only one half is working.</p>
+  </div>
+
+  <p>
+    And the traffic number is better than it looks. At the default geometry K costs
+    <b>4 DMAs for 4 kv blocks</b>: <b>every key block is loaded exactly once for the whole
+    layer.</b> Not once per query row — once, full stop. The reason is visible in the kv index
+    sequence,
+  </p>
+
+  <p class="eq">
+    i=0: 0, 0 &nbsp;·&nbsp; i=1: 0, 1 &nbsp;·&nbsp; i=2: 1, 2 &nbsp;·&nbsp; i=3: 2, 3<br>
+    flattened &nbsp; 0 0 0 1 1 2 2 3
+  </p>
+
+  <p>
+    which never decreases. Row <i>i</i> ends on block <i>i</i> and row <i>i+1</i> begins on
+    block <i>i</i>, so the elision <b>crosses the row boundary</b> — the pipeline knows nothing
+    about rows, only about consecutive steps. Every repeat collapses, and the count falls to
+    the number of distinct blocks.
+  </p>
+
+  <div class="warn">
+    <span class="note-label">This is a property of the geometry, not of block skipping</span>
+    <p>It holds because <code>W ≤ bkv</code> makes each row's live set exactly
+    <code>{i−1, i}</code>. Break that and the sequence stops rising. Set the widget to
+    <code>W = 1024</code> at <code>B = 512</code>: rows now overlap in two blocks, the sequence
+    steps <i>backwards</i> at each boundary, and K DMAs go 4 → <b>8</b> against the same four
+    distinct blocks. Worse, halve the block instead — <code>W = 512</code>, <code>B = 256</code>
+    — and it is <b>20 DMAs for 8 blocks</b>. The
+    <a href="../reference/block-skipping-arithmetic.html">reference sheet</a> already told you
+    halving <code>B</code> quadruples the grid; it did not tell you it also destroys the
+    load-once property, because that fact needs the pipeline, and in session 1 you did not
+    have it yet.</p>
+  </div>
+
+  <h2>5 · What it does at full context</h2>
+
+  <p>
+    Gemma 3 1B, one local layer, <code>N = 32768</code>, <code>W = 512</code>,
+    <code>B = 512</code> — measured, not extrapolated:
+  </p>
+
+  <table>
+    <thead><tr><th>Quantity</th><th class="num">dense grid</th><th class="num">shrunk grid</th></tr></thead>
+    <tbody>
+      <tr><td>grid</td><td class="num">(64, 64)</td><td class="num">(64, 2)</td></tr>
+      <tr><td>grid steps</td><td class="num">4096</td><td class="num">128</td></tr>
+      <tr class="highlight"><td>steps that compute</td><td class="num">4096</td><td class="num">127</td></tr>
+      <tr><td>K block loads</td><td class="num">4096</td><td class="num">64</td></tr>
+    </tbody>
+  </table>
+
+  <p>
+    Check the highlighted row against arithmetic you did in session 1. Live tiles are
+    <code>R·m − m(m−1)/2</code> with <code>R = 64</code> and <code>m = W/B + 1 = 2</code>, so
+    <code>128 − 1 = 127</code>. The
+    <a href="../reference/block-skipping-arithmetic.html">reference sheet</a> says 127. The
+    kernel executes 127. <b>The predicate and the pipeline agree, and the one spare step is
+    the padding in row 0</b>, which the table marks <code>0</code> so nothing runs in it.
+  </p>
+
+  <h2>6 · Three things the table does not do</h2>
+
+  <p>
+    Each of these has a specific cost, and none of them is optional:
+  </p>
+
+  <ul>
+    <li><b>It does not mask within a block.</b> At <code>W = B = 512</code> the widget's
+      <code>block_mask</code> contains only <code>0</code> and <code>1</code> — <i>no twos at
+      all</i>, because no 512×512 block sits entirely inside a 512-wide band. Every block you
+      load still needs lesson 01's elementwise mask. Block skipping removes whole dead blocks;
+      it never removes the mask.</li>
+    <li><b>It does not make a padded step free.</b> A row with fewer live blocks than
+      <code>grid_width</code> is padded, and <code>block_mask = 0</code> stops the compute —
+      but the pipeline still resolves that step's <code>index_map</code> and may fetch. The
+      library pads <code>data_next</code> with <b>0</b>, not with a repeat of the previous
+      index, so a padded step after a high block index costs a genuine transfer. Harmless for
+      a local layer, where only row 0 is short. Not harmless for a causal one.</li>
+    <li><b>It does not build itself.</b> <code>process_mask</code> is host-side NumPy that
+      materialises the mask block by block and reduces each one with <code>.any()</code> and
+      <code>.all()</code>. That is fine when the mask is static and known at trace time — which
+      for windowed prefill it is. It is not free for a mask that changes per call.</li>
+  </ul>
+
+  <h2>7 · Is the output still safe?</h2>
+
+  <p>
+    One thing should worry you. <a href="0003-which-axis-goes-last.html">Lesson 03</a>'s
+    accumulator works because "all invocations that write to a particular slice are
+    <b>consecutive</b>". Shrinking a grid is exactly the kind of surgery that could break
+    consecutiveness — so check it rather than assume it.
+  </p>
+
+  <p>
+    It holds, and the reason is structural: shrinking removes steps from <i>inside</i> a row
+    and never permutes <code>i</code>. The output <code>index_map</code> returns <code>i</code>,
+    so the output block is revisited <code>grid_width</code> times in a row, then never again.
+    Confirmed by execution — a shrunk-grid kernel accumulating with
+    <code>o_ref[...] += …</code> matches a dense masked reference to
+    <code>8.7e-7</code> relative, under both interpreters. If revisits were not consecutive the
+    partial sums would have been flushed and overwritten.
+  </p>
+
+  <div class="note">
+    <span class="note-label">So why does <code>splash_attention</code> carry an <code>o_scratch</code>?</span>
+    <p>You asked this at the end of lesson 04. Now it can be answered from the source: because
+    <code>o_ref</code> is <b>not</b> its accumulator. The running output lives in
+    <code>o_scratch_ref</code> at f32 and is rescaled every inner step by the online-softmax
+    factor — <code>o_scratch_ref[:] = alpha_o * o_scratch_ref[:] + o_curr</code> — and
+    <code>o_ref</code> is written <b>exactly once</b>, on the last inner step, already
+    normalised and already cast:
+    <code>o_ref[...] = (o_scratch_ref[...] * l_inv).astype(o_ref.dtype)</code>. Two reasons it
+    has to be that way. The accumulator needs f32 while <code>o_ref</code> carries the caller's
+    output dtype, and the division by <code>ℓ</code> can only happen once, at the end. So
+    <code>o_ref</code>'s residency is not being used to accumulate — it is being used to avoid
+    <code>grid_width − 1</code> pointless write-backs. Same residency, different reason.</p>
+  </div>
+
+  <h2>8 · Retrieve it</h2>
+
+  <p>
+    Three of these reach back to lessons 01 and 04. One of them cannot be answered by running
+    anything — <b>and if you are tempted to build the widget's geometry in Python first, don't
+    do that before answering.</b>
+  </p>
+
+  <div id="quiz"></div>
+
+</article>
+
+<footer class="footer">
+
+  <h3>Read this next</h3>
+  <p>
+    <a href="https://docs.jax.dev/en/latest/pallas/tpu/sparse.html">Scalar Prefetch and
+    Block-Sparse Computation</a> — the page <a href="../RESOURCES.md">RESOURCES.md</a> has been
+    holding back until this phase. It builds the same idea from the other end: a block-sparse
+    matmul rather than attention, small enough to read in one sitting, and its worked example
+    is the minimal version of everything above. Then, if you want the argument for <i>why</i>
+    this is worth doing at all, <a href="https://arxiv.org/abs/2205.14135">FlashAttention</a>
+    <b>§3.3 Block-Sparse</b> — three pages, and it is the IO-complexity result of §3.2 with a
+    sparsity factor multiplied through.
+  </p>
+
+  <h3>Elsewhere in this workspace</h3>
+  <ul>
+    <li><a href="../reference/scalar-prefetch-and-shrunk-grids.html">Reference · Scalar prefetch and shrunk grids</a> — the compressed version, with the table constructions and the kernel skeleton</li>
+    <li><a href="../reference/block-skipping-arithmetic.html">Reference · Block-skipping arithmetic</a> — the predicate this lesson compiles into a table</li>
+    <li><a href="../docs/research/0001-pallas-grid-blockspec-index-map.md">Research 0001 · grid, BlockSpec, index_map</a> — §3.2 is the elision rule, §6.3 scalar prefetch, §7 the splash_attention read-through</li>
+    <li><a href="0004-two-rules-your-cpu-wont-enforce.html">Lesson 04 · Two rules your CPU won't enforce</a></li>
+    <li><a href="0003-which-axis-goes-last.html">Lesson 03 · Which axis goes last</a> — the elision rule this lesson is entirely made of</li>
+    <li><a href="0002-the-normaliser-you-dont-have-yet.html">Lesson 02 · The normaliser you don't have yet</a></li>
+    <li><a href="0001-the-mask-is-a-work-map.html">Lesson 01 · The mask is a work map</a> — the predicate, five sessions later</li>
+    <li><a href="../CONTEXT.md">CONTEXT.md</a> — canonical vocabulary</li>
+    <li><a href="../MISSION.md">MISSION.md</a> — why any of this is being learned</li>
+  </ul>
+
+  <h3>Where this goes</h3>
+  <p>
+    You now have every piece of a windowed-prefill kernel: which tiles are load-bearing, what
+    to do with one when it arrives, which axis keeps an operand resident, how big a block may
+    be, and how to make the grid refuse the rest. What you do not have is a number. Phase 6
+    asks <b>which roof binds</b> — and block skipping is precisely the kind of change that
+    moves a kernel from one roof to the other, because it cuts traffic and FLOPs by different
+    factors. Cutting 4096 loads to 64 while cutting compute 4096 → 127 changes the arithmetic
+    intensity, and that is the next thing worth being able to compute.
+  </p>
+
+  <div class="ask">
+    <b>Ask your teacher.</b> Open questions from this one, in rising order of how much they
+    would bother a reviewer: whether the padded step's fetch is actually issued on hardware or
+    optimised away by Mosaic; whether <code>grid_width</code> should ever be tuned below the
+    busiest row's live count, accepting a wrong answer for one row; and what
+    <code>RevisitMode.ANY</code> is <i>for</i>, since a shrunk grid — the obvious candidate —
+    turns out not to need it. That last one is still an open gap in
+    <a href="../RESOURCES.md">RESOURCES.md</a> and is now the best-posed question this
+    workspace has for <a href="https://github.com/jax-ml/jax/discussions">jax-ml/jax
+    Discussions</a> after the block-shape ambiguity.
+  </div>
+
+</footer>
+
+<script src="../assets/mask-grid.js"></script>
+<script src="../assets/pipeline-grid.js"></script>
+<script src="../assets/skip-table.js"></script>
+<script src="../assets/quiz.js"></script>
+<script>
+SkipTable.mount('#skip', {
+  title: 'Prefetched tables and the grid they shrink',
+  seqLen: 2048,
+  window: 512,
+  block: 512,
+  controls: ['seqLen', 'window', 'block']
+});
+
+Quiz.mount('#quiz', {
+  title: 'Retrieval practice',
+  questions: [
+    {
+      stem: 'You build <code>data_next</code>, wire it into K and V\'s <code>index_map</code>, and leave the grid at its full <code>(4, 4)</code>. Measured against the version with no table at all, what happens?',
+      options: ['steps fall, DMA count unchanged',
+                'DMAs fall, step count unchanged',
+                'both fall, in equal proportion',
+                'neither falls, only compute does'],
+      answer: 1,
+      why: 'DMAs 16 → 4; steps stay at 16. The table makes dead columns resolve to a neighbour\'s block index, so consecutive steps request the same slice and lesson 03\'s rule elides the copy — that is the entire traffic win, and it needs no grid surgery. What the table cannot do is remove a step: the pipeline still walks all sixteen, and eight of them do nothing because <code>block_mask = 0</code> gates the compute. <b>The table buys the traffic; the shrink buys the steps.</b> They are separable, and knowing which one you have is how you debug a kernel that got faster but not fast enough.'
+    },
+    {
+      stem: 'At <code>W = 512</code>, <code>B = 512</code> the shrunk grid loads each kv block exactly once — 4 DMAs for 4 blocks. Change <code>W</code> to <code>1024</code> and nothing else: it measures 8 DMAs for the same 4 blocks. What went wrong?',
+      options: ['the grid began revisiting query rows',
+                'the padded steps became real fetches',
+                'the kv index sequence stopped rising',
+                'the block shapes stopped dividing well'],
+      answer: 2,
+      why: 'Elision is a property of the <i>flattened step sequence</i>, not of the grid\'s shape. At <code>W ≤ B</code> each row is <code>{i−1, i}</code>, so row <i>i</i> ends on block <i>i</i> and row <i>i+1</i> starts on it — the sequence never decreases and every repeat collapses. At <code>W = 1024</code> rows overlap in two blocks, so the sequence steps backwards at each boundary (<code>… 1 2 | 1 2 3</code>) and the pipeline re-fetches. Query rows are still visited in order; that is not it. Padding does cost a fetch here, but it is a side effect, not the cause — the descent at each row boundary happens whether or not a row is padded. <b>Ask what the step sequence looks like, not what the grid looks like.</b>'
+    },
+    {
+      stem: '<code>block_mask</code> takes three values. Blocks marked <code>1</code> and blocks marked <code>2</code> are both fetched and both computed, so the distinction saves no traffic and no matmul. What does the <code>2</code> buy?',
+      options: ['skipping this block\'s HBM transfer',
+                'skipping the softmax rescale step',
+                'skipping the elementwise mask pass',
+                'skipping the output write-back step'],
+      answer: 2,
+      why: '<code>2</code> means <i>entirely ones</i> — every <code>(q, k)</code> pair in the block is allowed — so the <code>jnp.where</code> that zeroes forbidden pairs is a no-op and is skipped. In the source: <code>should_not_mask = block_mask_ref[h,i,j] != 1</code>, passed into <code>_apply_mask_and_soft_cap</code>. This is lesson 01\'s <b>full</b>, and it is exactly why that sheet has three rows rather than two: <i>live</i> decides whether to load, <i>full</i> decides whether to mask. They are different relations over the same two intervals — <b>live</b> asks whether the tile\'s diagonal range <i>intersects</i> the band, <b>full</b> asks whether the band <i>contains</i> it. Worth noting when the payoff shows up: at <code>W = B = 512</code> there are no twos at all, because no 512-wide block fits inside a 512-wide band. Shrink <code>B</code> to 256 and they appear.'
+    },
+    {
+      stem: 'You run the shrunk-grid kernel on your laptop. It matches a dense masked reference to <code>8.7e-7</code> under <code>interpret=True</code> <i>and</i> under <code>pltpu.InterpretParams()</code>, and the sentinel probe reports 4 K DMAs where the dense grid needs 16. What has that established?',
+      options: ['that real hardware issues four transfers',
+                'that table and elision compose correctly',
+                'that Mosaic honours its documented rule',
+                'that windowing beats causality on chip'],
+      answer: 1,
+      why: 'It establishes that <i>this</i> table, fed to <i>this</i> <code>index_map</code>, produces the intended block-visit sequence, and that the documented elision rule applied to that sequence yields four — in the two implementations exercised, both of which are CPU interpreters. It says nothing about a v5e, where the pipeline is emitted by Mosaic and whether elision is contractual on that path is still an <a href="../RESOURCES.md">open gap</a>. Two interpreters agreeing is not a quorum when neither is the thing you will ship on. <b>Name the instrument, then state the boundary — the same discipline the mission asks for on a roofline, applied to your own measurement.</b>'
+    },
+    {
+      stem: 'Now that the grid is shrunk, you wonder whether to raise <code>bq = bkv</code> from 512 to 2048 and cut the step count further. Lesson 04 costed the 512 case at 4 MiB of VMEM. What is the right <i>first</i> thing to work out?',
+      options: ['the total VMEM footprint at 2048',
+                'the published VMEM ceiling for v5e',
+                'the reduction in total grid steps',
+                'which of the two terms dominates'],
+      answer: 3,
+      why: 'The footprint is two terms with different exponents: operands and scratch are <b>linear</b> in the block, the score tile is <code>bq × bkv</code> and therefore <b>quadratic</b>. At 512 they are 3 MiB and 1 MiB; at 2048 they are 12 MiB and 16 MiB, so the term that decides has changed hands. The crossover is <code>b = 1536</code> and you are proposing to jump straight over it. The <i>total</i> at 2048 (28 MiB) is a fact about Gemma; <b>which regime you are in</b> is the thing that transfers to the next kernel, and it is also what tells you the useful lever above the crossover is decoupling <code>bkv</code> from <code>bkv_compute</code> rather than shrinking either.'
+    },
+    {
+      stem: 'On a shrunk grid <code>splash_attention</code>\'s output <code>index_map</code> ignores <code>j</code>, so <code>o_ref</code> is resident across the whole inner loop — lesson 03\'s accumulator pattern exactly. Yet the kernel keeps a separate <code>o_scratch</code> and writes <code>o_ref</code> only on the last inner step. Why?',
+      options: ['the caller\'s dtype is too narrow',
+                'the buffer is cleared between steps',
+                'the output block rotates each step',
+                'the write-back fires on every step'],
+      answer: 0,
+      why: '<code>o_ref</code> carries the dtype the caller asked for — typically bf16 — and an online-softmax accumulator that gets rescaled by <code>exp(m_prev − m_new)</code> on every inner step cannot survive that. So the running sum lives in <code>o_scratch_ref</code> at f32, and <code>o_ref</code> receives one store at the end: <code>o_ref[...] = (o_scratch_ref[...] * l_inv).astype(o_ref.dtype)</code>. There is a second reason in the same line — the division by <code>ℓ</code> can only be applied once, after the last block. The buffer is <i>not</i> cleared and does <i>not</i> rotate; residency is real, and the kernel is using it, just not to accumulate. <b>It is spending the residency on skipping <code>grid_width − 1</code> write-backs.</b> Same mechanism as lesson 03, different payoff.'
+    }
+  ]
+});
+</script>
+
+</body>
+</html>

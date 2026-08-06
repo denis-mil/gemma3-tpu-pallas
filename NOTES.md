@@ -18,7 +18,20 @@
   scripts and the inline `<script>` into one `vm` context with a stub `document`; that
   fires `quiz.js`'s option-hygiene warnings, catches a widget spec that throws, and can
   walk every relative `href`. A shim that silently fails to mount reports a clean pass —
-  assert that the mount actually happened.
+  assert that the mount actually happened. Session 7 hardened it further: assert each
+  mount point actually produced content, not merely that it exists.
+- **Build a new widget out of the old widgets' exports.** `skip-table.js` takes the
+  live/partial/full predicate from `MaskGrid.classify` and the copy-elision rule from
+  `PipelineGrid.trace`, so each rule has exactly one implementation in the workspace and
+  a lesson cannot quietly contradict an earlier one. Both were already exported; check
+  for that before reimplementing anything.
+- **When a library builds the artefact you are teaching, run *its* builder, not your
+  reimplementation of it.** Session 7's hand-built `data_next` matched
+  `process_mask(..., shrink_grid=True)` byte for byte at `W=512, B=512` — and diverged at
+  `W=1024`, because `_shrink_mask_info` pads with block index **0** while the obvious
+  guess is to repeat the previous index. The agreeing case was the one the lesson led
+  with; the diverging case was the one the quiz turned on. A reimplementation that matches
+  on your headline geometry is not validated.
 
 ## Teaching notes
 
@@ -89,7 +102,18 @@
    opening gap 5. Two things to probe: whether he reaches for the *regime* (linear vs
    quadratic) rather than the 4 MiB total, and whether the discriminator question (Q2,
    "what has a clean interpret-mode run established") sticks outside the quiz.
-5. `index_map` and shrunk grids — where lesson 0001's predicate becomes code (Phase 5).
+5. ~~`index_map` and shrunk grids — where lesson 0001's predicate becomes code (Phase 5)~~
+   — lesson [`0005`](lessons/0005-the-index-map-that-lies.html), **delivered session 7, not
+   yet assessed.** Reference sheet:
+   [`scalar-prefetch-and-shrunk-grids.html`](reference/scalar-prefetch-and-shrunk-grids.html).
+   Its quiz carries three spaced probes rather than a separate assessment: gap 4's *regime*
+   question (Q5), gap 4's *discriminator* question (Q4), and gap 1's residual — `full` as a
+   relation distinct from `live` (Q3). **If he answered the quiz, grade those three as the
+   assessments of gaps 1 and 4 and close them; if he skipped it, they stay open.**
+   Lesson 05's own load-bearing question is Q1: the table buys the traffic, the shrink buys
+   the steps.
 6. Roofline: which roof binds, and the arithmetic intensity that decides it (Phase 6).
+   Lesson 05 hands it a live number — block skipping cuts loads 4096 → 64 and compute
+   4096 → 127, i.e. by *different* factors, so it moves the arithmetic intensity.
 
 
