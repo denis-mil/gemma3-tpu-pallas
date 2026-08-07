@@ -1,9 +1,25 @@
 # Measurement 0001 — `fused_gated_mlp` on a TPU v5e
 
-**Status: predictions registered, not yet run.** Everything below the horizontal rule is
-written *before* any hardware time, and the verdict column is deliberately empty. Filling
-it in is the only edit this document should receive from the Colab session; a prediction
-adjusted after seeing the number is not a prediction.
+**Status: run on 2026-08-07, verdicts filled.** Everything below the horizontal rule was
+written *before* any hardware time and none of it has been altered — the verdict columns
+are the only cells this session touched. A prediction adjusted after seeing the number is
+not a prediction.
+
+Three conditions of the run that no verdict cell can carry:
+
+- **The headline `block_h` was 384, not the 768 quoted under Geometry.** 768 asks 22.5 MiB
+  of scoped VMEM and does not compile at the default limit, which is prediction 3's own
+  finding. The grid was therefore `(2, 18)`, not `(2, 9)`. Nothing else moves with it:
+  `mlp_bytes` does not depend on `block_h`, so the byte model and its intensity of 63.2 are
+  the same at either block.
+- **`HIGH` never ran.** `jax.lax.Precision.HIGH` does not lower on jax 0.11.0, so the
+  precision probe was cut to `DEFAULT` and `HIGHEST`. Every registered `HIGH` claim is
+  unscoreable, including the 21%-margin crossover that prediction 1 named its better test.
+- **The intensity ladder was traversed by `block_t`, not by `T`.** With `block_t` pinned,
+  `I = 6EH·T / (T/block_t · 3EH·4 + 8TE)` and `T` cancels exactly, so the token sweep sits
+  at I = 63.2 at every size. Sweeping `block_t` at a fixed `T = 2048` walks 63.2, 124.9,
+  244.0, 466.0, 855.1 — prediction 1's ladder exactly — and that is where its claims are
+  scored.
 
 - Kernel: [`src/gemma3_pallas/mlp.py`](../../src/gemma3_pallas/mlp.py), `fused_gated_mlp`
 - Harness: [`src/gemma3_pallas/bench.py`](../../src/gemma3_pallas/bench.py)
@@ -99,11 +115,11 @@ is wrong — which is the interesting result, not a failure.**
 
 | Claim | Verdict |
 |---|---|
-| `HIGH` crosses between T=128 and T=256 | *not yet run* |
-| `DEFAULT` is HBM-bound at T=256 | *not yet run* |
-| `DEFAULT` is compute-bound at T=1024 | *not yet run* |
-| `DEFAULT` at T=512 is unresolvable | *registered as unscoreable* |
-| `HIGHEST` is compute-bound at every T | *not yet run* |
+| `HIGH` crosses between T=128 and T=256 | **unscoreable** — `HIGH` does not lower on jax 0.11.0 |
+| `DEFAULT` is HBM-bound at T=256 | **held** — at I=124.9 the kernel takes 1.260 ms against 2.393 ms at I=63.2, a 1.90x gain for a 1.98x cut in bytes |
+| `DEFAULT` is compute-bound at T=1024 | **held** — I=466.0 gives 0.747 ms against 0.766 ms at I=244.0, and halving the bytes again to I=855.1 makes it *slower* at 0.785 ms |
+| `DEFAULT` at T=512 is unresolvable | *registered as unscoreable* — measured 0.766 ms, 2.5% off the floor, which fits either roof |
+| `HIGHEST` is compute-bound at every T | **held** — kernel and XLA land within 4% of each other at every T (1.02–1.04x from T=256 up) even though XLA moves half the bytes; under a memory roof the lighter traffic would win |
 
 ## Registered prediction 2 — the on-device error
 
@@ -119,9 +135,9 @@ chosen by measurement rather than by assumption.
 
 | Claim | Verdict |
 |---|---|
-| `DEFAULT` error ≫ 3.28e-6 | *not yet run* |
-| error falls monotonically DEFAULT → HIGH → HIGHEST | *not yet run* |
-| some precision reproduces the CPU error | *not yet run* |
+| `DEFAULT` error ≫ 3.28e-6 | **held** — 9.64e-3 absolute against an output scale of 2.15, about 2900x the CPU figure, and a max *relative* error of 3.03 |
+| error falls monotonically DEFAULT → HIGH → HIGHEST | **partly scoreable** — the one measurable leg falls, 9.64e-3 to 2.05e-5; the `HIGH` point does not exist |
+| some precision reproduces the CPU error | **not held** — `HIGHEST` reaches 2.05e-5, still 6.3x the CPU's 3.28e-6, and it is the closest the toolchain offers. Its 6 passes were used as the divisor anyway, which is what the prediction wanted the error for |
 
 ## Registered prediction 3 — the VMEM budget
 
@@ -137,8 +153,8 @@ moves that boundary.
 
 | Claim | Verdict |
 |---|---|
-| the default limit lies strictly between two swept working sets | *not yet run* |
-| `vmem_limit_bytes` moves the boundary, without a runtime restart | *not yet run* |
+| the default limit lies strictly between two swept working sets | **held** — 12.375 MiB compiles, 22.5 MiB does not, and no admissible `block_h` lies between them. The bracket did not need to be narrowed: the compiler names its own limit, "size 22.50M and limit 16.00M" |
+| `vmem_limit_bytes` moves the boundary, without a runtime restart | **held** — `block_h=768` fails at 16 MiB and runs at 32 (0.499 ms); `block_h=6912` fails through 64 MiB and runs at 100 (0.399 ms). The second row also confirms the single-buffering rule: its 91.1 MiB of weights fit under 100 MiB only because the `h` axis is one step long, and two buffers could not have |
 
 ## Registered prediction 4 — copy elision
 
@@ -150,7 +166,36 @@ under elision.
 
 | Claim | Verdict |
 |---|---|
-| `w_*` DMAs per call = `tokens // block_t` × 3, not 3 | *not yet run* |
+| `w_*` DMAs per call = `tokens // block_t` × 3, not 3 | **held** — see below |
+
+The count did not come from where the prediction expected it. `Pallas Primitives` is empty
+in the capture even under `tpu_trace_mode="TRACE_COMPUTE_AND_SYNC"`, so there is no row of
+named DMA events to tally. What that mode does add is the `Tensor Core Sync Flag` line, and
+the DMAs are visible there as the waits that retire them: four flags, 18 waits each, 72 per
+call, in a rigid 14.03 us cycle of `SyncWait:55, 57, 56, 58` — two streams, double-buffered.
+The grid is 36 steps and every one of them must execute, so 18 cycles cover 36 steps at two
+waits per step.
+
+The decisive evidence is positional rather than arithmetic. Under elision the second `t`
+pass — steps 18 through 35 — fetches no weights at all, so the waits stop at the halfway
+mark. They do not: the spacing is uniform end to end, the last `SyncWait:58` landing at
+255.5 us of a 258.4 us call on the same 14.03 us rhythm as the first. Both `t` passes fetch,
+which is the corrected model.
+
+Two supporting numbers. 187.2 us of the 258.4 us call, 72.4%, is spent blocked on those
+flags; a kernel moving only the elided model's 95.5 MB needs 117 us of transfer in total and
+cannot spend 187 us waiting for it. And per grid step the kernel moves 5.31 MB in 7.02 us,
+756 GB/s, which is 92% of the 819 GB/s roof — the corrected model's traffic running at very
+nearly the speed the hardware can supply it.
+
+One instrumentation finding falls out of the same trace, and it applies to every wall-clock
+number this notebook reports. Device time at the headline geometry is 258.4 us per call
+(258.40, 258.53, 258.43, 258.56, 258.43 across five calls) against a wall-clock median of
+486 us, so roughly 228 us per call is host dispatch that no roof accounts for.
+`bench.time_call` measures wall clock, so the `%roof` column understates on-chip efficiency
+badly at small `T` — the kernel reaches 91% of its memory roof at T=256, not the 48.6%
+printed. It does not rescue the kernel against XLA: subtracting a constant from both makes
+the ratio worse, not better.
 
 ## Notes on the constants
 
