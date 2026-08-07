@@ -134,21 +134,40 @@ practitioners. Nothing has been posted yet.
 
 ## Gaps
 
-- **TPU v5e microarchitecture — now *partially* closed.** `tpu_info.py` supplies both
-  roofs (197 TFLOP/s, 820e9 B/s), VMEM 128 MiB, SMEM 1 MiB, HBM 16 GiB, and **4 MXUs of
-  128×128**, which is enough to place a kernel against the roofs and enough to state what
-  the compute roof assumes. Still missing, and still needed to *explain* a gap rather than
-  bound it: **MXU issue latency, VMEM banking, DMA granularity** — i.e. everything that
-  would let a ceiling be drawn below the roof. Do not try to back out a clock from
-  `peak / (num_mxus · dim² · 2)`: it gives a clean 1.5 GHz on v5e and an impossible
-  3.5 GHz on v6e, so it is a mnemonic, not a derivation.
+- **TPU v5e microarchitecture — closed as an errand, deferred until there is a measurement
+  to explain.** `tpu_info.py` already supplies both roofs (197 TFLOP/s, 820e9 B/s), VMEM
+  128 MiB, SMEM 1 MiB, HBM 16 GiB, and **4 MXUs of 128×128** — enough to place a kernel
+  against the roofs and to state what the compute roof assumes. What was still being
+  chased — **MXU issue latency, VMEM banking, DMA granularity** — is the material for a
+  *ceiling below the roof*, and a ceiling exists to explain a **shortfall**. With no chip
+  there is no shortfall, so a ceiling fitted now would be a mechanism fitted to zero data
+  points. Two of the three are not published for v5e at all; the third, DMA granularity,
+  was already searched in [research 0001](docs/research/0001-pallas-grid-blockspec-index-map.md)
+  and yielded only a passing "4KBi" in the SMEM section. **Reopen when a Colab run
+  produces a gap that the roofs alone do not account for**, and not before. The two items
+  that do cash in on a first Colab session are the next two entries: the
+  `--xla_tpu_scoped_vmem_limit_kib` default and the copy-elision xprof count.
+  Do not try to back out a clock from `peak / (num_mxus · dim² · 2)`: it gives a clean
+  1.5 GHz on v5e and an impossible 3.5 GHz on v6e, so it is a mnemonic, not a derivation.
 - ~~**No worked Pallas tutorial** at the level of "here is why this `index_map` and not
   that one"~~ — closed by
   [research 0001](docs/research/0001-pallas-grid-blockspec-index-map.md), which pins the
   copy-elision rule to `tpu/details.html` and demonstrates it by execution.
 - **The default value of `--xla_tpu_scoped_vmem_limit_kib`** — not the physical 128 MiB,
   is what a kernel actually gets. `pltpu.CompilerParams` proves the flag governs the
-  budget but never states its default. Not in the JAX Python tree.
+  budget but never states its default. Not in the JAX Python tree. **Session 10 made this
+  strictly a hardware question:** `pltpu.InterpretParams` models **no VMEM capacity at
+  all**. Its twelve fields are `detect_races`, `out_of_bounds_reads`,
+  `skip_floating_point_ops`, `uninitialized_memory`, `num_cores_or_threads`,
+  `vector_clock_size`, `logging_mode`, `dma_execution_mode`, `random_seed`,
+  `grid_point_recorder`, `allow_hbm_allocation_in_run_scoped`, `buffer_bounds` — no
+  capacity among them — and `jax._src.pallas.mosaic.interpret` contains zero occurrences
+  of "vmem", "capacity" or "OOM". So the higher-fidelity interpreter simulates HBM/VMEM
+  *movement* (DMAs, semaphores) but not VMEM *size*: **no local test can ever falsify a
+  block-size choice.** `tests/test_mlp_kernel.py::test_gemma_dims_under_simulated_memory`
+  passes on a 22.5 MiB predicted working set and that fact carries no information about
+  the budget. Useful side effect: `uninitialized_memory` defaults to `nan`, which is why
+  a missing accumulator init fails loudly rather than plausibly.
 - **Whether copy elision is contractual on the hardware path.** The docs state it as a
   property and two JAX-authored pipeline implementations honour it, but the `pallas_call`
   pipeline on TPU is emitted by the Mosaic compiler, out of reach from Python. An xprof

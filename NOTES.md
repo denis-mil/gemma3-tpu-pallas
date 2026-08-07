@@ -48,6 +48,25 @@
   first. Sweep the controls too: every reachable combination should be finite, positive,
   and fast enough to be interactive.
 
+- **Check what the simulator models before designing a test around it.** Session 10 built
+  a test to hand `InterpretParams` the real 22.5 MiB working set, on the open question of
+  whether it enforces a VMEM capacity. Reading its twelve fields and grepping
+  `jax._src.pallas.mosaic.interpret` for `vmem|capacity|OOM` — under a minute — answered
+  it: **it models no capacity at all**, so the test could never have failed for the reason
+  it was written. It was kept for the DMA/semaphore path at the real grid, with the
+  docstring rewritten to say what it cannot do. Generalise: *a test justified by a
+  behaviour you have not confirmed the tool has is a test you cannot read the result of* —
+  and passing is the outcome that hides the problem. The workspace's session-7 rule (run
+  the library's builder, not your model of it) has a cheaper sibling: **read the library's
+  field list before predicting its behaviour.**
+- **Two ways to get an accumulator wrong, and only one test tells them apart.** The
+  reduction axis is minormost, so the output block is a running partial sum. Omitting the
+  init and zeroing on *every* step both look like "initialise the accumulator", and a grid
+  with one reduction step (`H // block_h == 1`) passes the second. Session 10 ran all
+  three variants before keeping `@pl.when(program_id(1) == 0)`. Generalise: *a
+  reduction-axis kernel needs a test with at least two steps on that axis, and it must be
+  written before the guard, not after.*
+
 ## Teaching notes
 
 - Denis reasons from primary sources and writes ADRs for his own decisions; the repo's
@@ -172,6 +191,16 @@
    the block decomposition is a decision he has to make rather than an exercise he can skip.
    The workspace's own rule — run the library's builder, not your model of it — now applies
    to the kernel itself.
+
+   **Done session 10.** [`src/gemma3_pallas/mlp.py`](src/gemma3_pallas/mlp.py) —
+   `fused_gated_mlp`, grid `(tokens // block_t, hidden_dim // block_h)` with the hidden
+   axis minormost, `@pl.when` accumulator init, fp32, divisible shapes only.
+   [`tests/test_mlp_kernel.py`](tests/test_mlp_kernel.py) has 8 items; README Phase 2 is
+   ticked. Two things the session settled and one it could not: the accumulator has two
+   distinguishable failure modes (rule above), `InterpretParams` models no VMEM capacity
+   (rule above, and `RESOURCES.md`), and therefore **the 22.5 MiB block-size prediction
+   remains unverified** — it is now a Colab errand, not a local one. No lesson was written:
+   the friction was real but it produced rules for this file, not a predicate he lacks.
 
 ## Corrections this workspace has made to itself
 

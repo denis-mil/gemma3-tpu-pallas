@@ -3,8 +3,9 @@
 Custom TPU kernels written in [Pallas](https://docs.jax.dev/en/latest/pallas/), benchmarked at the exact
 shapes [Gemma 3 1B](https://huggingface.co/google/gemma-3-1b-it) runs, on a single TPU v5e.
 
-**Status: scaffolding and references complete. No kernel is written yet.** The roadmap below
-is a plan, not a claim.
+**Status: the first kernel is written — the fused gated-MLP (Phase 2), correct under interpret
+mode on CPU. It has never run on a TPU, and no performance number exists.** The rest of the
+roadmap below is a plan, not a claim.
 
 📖 **[Lessons and reference sheets →](https://denis-mil.github.io/gemma3-tpu-pallas/)** — six
 lessons deriving the windowed-attention kernel from first principles, plus five reference sheets.
@@ -44,7 +45,8 @@ Everything above lives in [`shapes.py`](src/gemma3_pallas/shapes.py) and is asse
 
 - [x] **Phase 0** — local CPU environment, Pallas interpret mode verified working
 - [x] **Phase 1** — repo scaffolding, shape constants, fp32 references
-- [ ] **Phase 2** — fused gated-MLP kernel *(warm-up; goal is understanding, parity with XLA is fine)*
+- [x] **Phase 2** — fused gated-MLP kernel *(warm-up; goal is understanding, parity with XLA is fine)* —
+      [`mlp.py`](src/gemma3_pallas/mlp.py), fp32, correct under both interpret modes. No hardware run yet.
 - [ ] **Phase 3** — flash attention, stage 1: online softmax, no mask
 - [ ] **Phase 4** — stage 2: causal masking
 - [ ] **Phase 5** — stage 3: window block skipping via a shrunk grid and custom `index_map`,
@@ -90,7 +92,8 @@ Python 3.12 matches the Colab runtime (3.12.13). Verified on JAX 0.11.0, CPU bac
 src/gemma3_pallas/
   shapes.py       Gemma 3 1B + TPU v5e constants, KV-cache and roofline arithmetic
   reference.py    pure-JAX fp32 ground truth (GeGLU MLP, MQA attention, masks)
-tests/            reference correctness + Pallas interpret-mode smoke tests
+  mlp.py          Phase 2 — the fused gated-MLP Pallas kernel
+tests/            reference correctness + Pallas interpret-mode smoke and kernel tests
 docs/adr/         why the target, scope and workflow are what they are
 CONTEXT.md        glossary — the project's canonical vocabulary
 ```
