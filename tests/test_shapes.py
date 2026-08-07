@@ -62,8 +62,9 @@ def test_short_sequences_get_no_windowing_benefit():
 
 
 def test_roofline_picks_the_binding_constraint():
-    compute_bound, which = roofline_bound(flops=int(1e15), bytes_moved=1)
+    peak = V5E.peak_flops()  # explicit: there is no safe default compute roof
+    compute_bound, which = roofline_bound(flops=int(1e15), bytes_moved=1, peak_flops=peak)
     assert which == "compute"
-    memory_bound, which = roofline_bound(flops=1, bytes_moved=int(1e12))
+    memory_bound, which = roofline_bound(flops=1, bytes_moved=int(1e12), peak_flops=peak)
     assert which == "memory"
     assert compute_bound > 0 and memory_bound > 0

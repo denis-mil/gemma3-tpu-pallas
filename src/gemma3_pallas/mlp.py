@@ -16,6 +16,8 @@ The grid is `(tokens // block_t, hidden_dim // block_h)` with the hidden axis
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
@@ -28,12 +30,15 @@ _SUBLANE = 8
 _LANE = 128
 
 
-def _fused_gated_mlp_kernel(x_ref, wg_ref, wu_ref, wd_ref, o_ref):
+def _fused_gated_mlp_kernel(x_ref, wg_ref, wu_ref, wd_ref, o_ref, *, precision):
     """One grid step: a `block_h`-wide slice of the hidden dimension.
 
     `hidden_dim` is a *reduction* axis -- `w_down` contracts it away -- so each
     `h` step produces a partial sum of the same output block and accumulates
     into it.
+
+    `jnp.dot` rather than `@` throughout: the `@` operator takes no `precision`,
+    and precision is the whole question on TPU (see `fused_gated_mlp`).
     """
     # Initialise on the first visit only. Zeroing unconditionally would pass a
     # grid with one h step and discard every partial sum but the last on a grid
@@ -42,9 +47,13 @@ def _fused_gated_mlp_kernel(x_ref, wg_ref, wu_ref, wd_ref, o_ref):
     def _():
         o_ref[...] = jnp.zeros_like(o_ref)
 
-    gate = gelu_tanh(x_ref[...] @ wg_ref[...])  # [block_t, block_h]
-    up = x_ref[...] @ wu_ref[...]  # [block_t, block_h]
-    o_ref[...] += (gate * up) @ wd_ref[...]  # [block_t, embed_dim]
+    dot = functools.partial(
+        jnp.dot, precision=precision, preferred_element_type=jnp.float32
+    )
+
+    gate = gelu_tanh(dot(x_ref[...], wg_ref[...]))  # [block_t, block_h]
+    up = dot(x_ref[...], wu_ref[...])  # [block_t, block_h]
+    o_ref[...] += dot(gate * up, wd_ref[...])  # [block_t, embed_dim]
 
 
 def fused_gated_mlp(
@@ -55,7 +64,9 @@ def fused_gated_mlp(
     *,
     block_t: int,
     block_h: int,
-    interpret=True,
+    interpret=False,
+    precision: jax.lax.PrecisionLike = None,
+    compiler_params=None,
 ) -> jax.Array:
     """Gemma's GeGLU feed-forward block as a single Pallas kernel.
 
@@ -73,13 +84,28 @@ def fused_gated_mlp(
 
     `interpret` is passed through to `pallas_call`: `True` for plain functional
     emulation, `pltpu.InterpretParams()` for simulated HBM/VMEM, DMAs and
-    semaphores, `False` on real hardware.
+    semaphores, `False` -- the default -- on real hardware. The default is
+    hardware because the alternative fails silently: a forgotten `interpret`
+    on a CPU box times the emulator and reports it as a kernel number, whereas
+    a forgotten one now raises.
+
+    `precision` is threaded into all three matmuls. On TPU it matters more than
+    the operand dtype suggests: `DEFAULT` truncates the multiplies to bf16 and
+    accumulates in fp32, so **an fp32-typed kernel is not an fp32-precision
+    kernel unless asked**. `HIGH` and `HIGHEST` buy back the mantissa with 3 and
+    6 bf16 passes respectively, at 1/3 and 1/6 of the compute roof. On CPU the
+    setting is close to a no-op, which is why the local tests can check that it
+    threads through but not what it costs.
+
+    `compiler_params` goes straight to `pallas_call`; on TPU that is
+    `pltpu.CompilerParams`, whose `vmem_limit_bytes` is how `bench.py` sweeps
+    the VMEM budget without restarting the runtime.
     """
     x, w_gate, w_up, w_down = (a.astype(jnp.float32) for a in (x, w_gate, w_up, w_down))
     tokens, embed_dim, hidden_dim = _validate(x, w_gate, w_up, w_down, block_t, block_h)
 
     return pl.pallas_call(
-        _fused_gated_mlp_kernel,
+        functools.partial(_fused_gated_mlp_kernel, precision=precision),
         # `h` last: the output block's index_map is invariant in `h`, so with `h`
         # innermost its visits are consecutive -- the block stays resident and is
         # written back once. Swapping the axes would revisit output block 0 at
@@ -95,6 +121,7 @@ def fused_gated_mlp(
         out_specs=pl.BlockSpec((block_t, embed_dim), lambda i, j: (i, 0)),
         out_shape=jax.ShapeDtypeStruct((tokens, embed_dim), jnp.float32),
         interpret=interpret,
+        compiler_params=compiler_params,
     )(x, w_gate, w_up, w_down)
 
 

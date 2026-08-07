@@ -9,6 +9,11 @@ The kernel slices the hidden dimension across the grid, which makes `H` a
 block. `test_two_hidden_blocks_accumulate` is the test that fails if the
 accumulator is not initialised on the first visit -- it exists before any test
 that could not catch that.
+
+Every call below passes `interpret=` explicitly. The kernel's default is
+`interpret=False`, i.e. hardware, so that a forgotten argument fails on this
+machine instead of quietly timing the emulator; the price is that a test file
+which relies on emulation has to say so.
 """
 
 import jax
@@ -20,10 +25,17 @@ from gemma3_pallas.mlp import fused_gated_mlp
 from gemma3_pallas.reference import gated_mlp
 from gemma3_pallas.shapes import GEMMA3_1B
 
-# Measured, not guessed: the largest relative error observed at Gemma dims on
-# the first green run (see test_gemma_dims). fp32 throughout, so the only source
-# is a different summation order between the kernel's blocked reduction over H
-# and the reference's single fused matmul.
+# Measured, not guessed: the largest *absolute* error observed at Gemma dims on
+# the first green run was 3.28e-6, against an output scale of about 2.15 -- so
+# the binding constraint under `np.allclose` is the atol, and 1e-4 is roughly a
+# 30x margin over what was seen. fp32 throughout, so the only source is a
+# different summation order between the kernel's blocked reduction over H and
+# the reference's single fused matmul.
+#
+# This tolerance is a *CPU* measurement and does not transfer: on TPU,
+# `precision=DEFAULT` truncates the multiplies to bf16, and the error is
+# expected to exceed 1e-4. The Colab notebook reports the on-device error
+# rather than asserting this number.
 GEMMA_RTOL = 1e-4
 GEMMA_ATOL = 1e-4
 
@@ -55,7 +67,7 @@ def test_one_hidden_block():
     Non-Gemma dimensions deliberately, so nothing can be shape-hardcoded.
     """
     operands = _operands(t=16, e=128, h=128)
-    got = fused_gated_mlp(*operands, block_t=8, block_h=128)
+    got = fused_gated_mlp(*operands, block_t=8, block_h=128, interpret=True)
     want = gated_mlp(*operands)
     assert got.shape == (16, 128)
     assert np.allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
@@ -69,7 +81,7 @@ def test_two_hidden_blocks_accumulate():
     into whatever the buffer already held.
     """
     operands = _operands(t=16, e=128, h=256)
-    got = fused_gated_mlp(*operands, block_t=8, block_h=128)
+    got = fused_gated_mlp(*operands, block_t=8, block_h=128, interpret=True)
     want = gated_mlp(*operands)
     assert np.allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
 
@@ -78,7 +90,7 @@ def test_gemma_dims():
     """The real geometry: grid (2, 9) over Gemma 3 1B's MLP."""
     cfg = GEMMA3_1B
     operands = _operands(t=256, e=cfg.embed_dim, h=cfg.hidden_dim)
-    got = fused_gated_mlp(*operands, block_t=128, block_h=768)
+    got = fused_gated_mlp(*operands, block_t=128, block_h=768, interpret=True)
     want = gated_mlp(*operands)
     assert got.shape == (256, cfg.embed_dim)
     assert np.allclose(np.asarray(got), np.asarray(want), rtol=GEMMA_RTOL, atol=GEMMA_ATOL)
@@ -101,7 +113,10 @@ def test_ragged_shapes_raise(kwargs, axis):
     operands = _operands(t=kwargs["t"], e=kwargs["e"], h=kwargs["h"])
     with pytest.raises(ValueError, match=axis):
         fused_gated_mlp(
-            *operands, block_t=kwargs["block_t"], block_h=kwargs["block_h"]
+            *operands,
+            block_t=kwargs["block_t"],
+            block_h=kwargs["block_h"],
+            interpret=True,
         )
 
 
@@ -123,13 +138,18 @@ def test_gemma_dims_under_simulated_memory():
     """Gemma dims under simulated memory: the only test at the real footprint.
 
     Test 5's blocks are kilobytes; this is the one place the simulated-memory
-    path is handed the ~22.5 MiB working set the block choice predicts.
+    path is handed the ~23.25 MiB working set the block choice predicts (22.5
+    MiB of double-buffered operands plus the two `[block_t, block_h]` fp32
+    intermediates, 0.375 MiB each, that live inside the kernel body).
 
-    **It is not a VMEM assertion.** Whether `InterpretParams` models a capacity
-    limit at all is unknown, and that is worth checking rather than assuming. If
-    it does, a failure here is a finding about the block choice, not a defect in
-    the kernel. If it does not, the test still exercises the DMA/semaphore path
-    at the real grid (2, 9) rather than (2, 2).
+    **It is not a VMEM assertion, and it cannot become one.** Session 10 read
+    `InterpretParams`' twelve fields and grepped
+    `jax._src.pallas.mosaic.interpret`: it models no VMEM capacity at all. So
+    the simulated-memory path models HBM/VMEM *movement* -- DMAs, semaphores --
+    but not VMEM *size*, and no local test can falsify a block-size choice.
+    This one passes on a 23.25 MiB working set and that fact carries no
+    information about the budget; what it does buy is the DMA/semaphore path at
+    the real grid (2, 9) rather than (2, 2). The budget is a Colab errand.
 
     Not marked slow, on measurement: ~1.0s of a ~14s suite, and *faster* than
     the plain-interpret run of the same shapes. ~12 GFLOP of fp32 matmul sounds

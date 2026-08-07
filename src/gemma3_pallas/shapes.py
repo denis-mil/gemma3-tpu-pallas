@@ -80,6 +80,32 @@ class TpuV5e:
     hbm_bytes: int = 16 * 1024**3
     mxu_dim: int = 128  # v6e/Trillium is 256 -- block sizes do not port
 
+    def peak_flops(self, passes: int = 1) -> float:
+        """Effective compute roof when each multiply costs `passes` bf16 passes.
+
+        There is no published fp32 peak for v5e, and `tpu_info` does not carry
+        one. What TPU does instead is emulate an fp32 matmul with several bf16
+        passes -- `jax.lax.DotAlgorithmPreset` names `BF16_BF16_F32_X3` and
+        `_X6` -- so the fp32 roof is the bf16 roof divided by the pass count.
+
+        `passes=1` is `precision=DEFAULT` (bf16 multiplies, fp32 accumulate),
+        3 is HIGH, 6 is HIGHEST. Which one a given kernel actually gets is a
+        measurement, not a constant; that is why this is a parameter and not a
+        `peak_fp32_flops` field.
+        """
+        if passes < 1:
+            raise ValueError(f"passes {passes} must be at least 1")
+        return self.peak_bf16_flops / passes
+
+    def ridge_point(self, passes: int = 1) -> float:
+        """Arithmetic intensity (FLOP/byte) where the two roofs cross.
+
+        Below it a kernel is bandwidth-bound, above it compute-bound. Dividing
+        the compute roof by `passes` *lowers* the ridge, so asking for more
+        precision makes a kernel compute-bound at smaller sizes.
+        """
+        return self.peak_flops(passes) / self.peak_hbm_bandwidth
+
 
 GEMMA3_1B = Gemma3Config()
 V5E = TpuV5e()
@@ -106,14 +132,77 @@ def attention_flops(
     return 4 * pairs * cfg.head_dim * cfg.num_heads
 
 
-def roofline_bound(flops: int, bytes_moved: int, *, hw: TpuV5e = V5E) -> tuple[float, str]:
+def mlp_flops(tokens: int, *, cfg: Gemma3Config = GEMMA3_1B) -> int:
+    """FLOPs for one gated-MLP layer over `tokens` tokens.
+
+    Three matmuls -- gate, up, down -- each `tokens x embed_dim x hidden_dim`
+    at 2 FLOPs per multiply-accumulate. The GELU and the elementwise gate are
+    `O(tokens * hidden_dim)` and are dropped, as the roofline convention does.
+    """
+    return 6 * tokens * cfg.embed_dim * cfg.hidden_dim
+
+
+def mlp_bytes(
+    tokens: int,
+    *,
+    block_t: int,
+    cfg: Gemma3Config = GEMMA3_1B,
+    dtype_bytes: int = 4,
+    elide_weights: bool = False,
+) -> int:
+    """HBM traffic for `fused_gated_mlp` at this geometry.
+
+    The weights term is the load-bearing one. The grid is
+    `(tokens // block_t, hidden_dim // block_h)` with the hidden axis
+    **innermost**, and the `w_*` `index_map`s vary in the inner index -- so one
+    `t` step walks every hidden block, and when the inner index resets for the
+    next `t` step, block 0 is no longer the previously-fetched slice. Copy
+    elision only skips a transfer between *consecutive* identical slices, so it
+    cannot apply across that reset: the weights are re-read once per `t` step,
+    `tokens // block_t` times in total, not once.
+
+    `elide_weights=True` gives the counterfactual where they are read once. The
+    two counts differ by a factor of `tokens // block_t`, which is what an xprof
+    DMA count adjudicates between -- neither is measured yet.
+
+    Activations are `x` in and the output out, `tokens * embed_dim` each, read
+    and written exactly once regardless of blocking.
+    """
+    if tokens % block_t:
+        raise ValueError(f"tokens {tokens} is not divisible by block_t {block_t}")
+    passes = 1 if elide_weights else tokens // block_t
+    weights = 3 * cfg.embed_dim * cfg.hidden_dim * dtype_bytes
+    activations = 2 * tokens * cfg.embed_dim * dtype_bytes
+    return passes * weights + activations
+
+
+def arithmetic_intensity(flops: int, bytes_moved: int) -> float:
+    """FLOPs per byte of HBM traffic -- the x-axis of a roofline plot."""
+    if bytes_moved <= 0:
+        raise ValueError(f"bytes_moved {bytes_moved} must be positive")
+    return flops / bytes_moved
+
+
+def roofline_bound(
+    flops: int,
+    bytes_moved: int,
+    *,
+    peak_flops: float,
+    bandwidth: float = V5E.peak_hbm_bandwidth,
+) -> tuple[float, str]:
     """Return (best achievable seconds, which roof binds).
 
     Compares the compute roof against the bandwidth roof so a benchmark can say
     *why* it is slow, not merely that it is.
+
+    `peak_flops` is required and has no default. v5e publishes one peak, for
+    bf16; an fp32-typed kernel runs against that roof divided by however many
+    bf16 passes the requested precision costs, so there is no single number a
+    call site could safely inherit. Use `TpuV5e.peak_flops(passes)`. The
+    bandwidth roof does have one published value, so it keeps its default.
     """
-    compute_s = flops / hw.peak_bf16_flops
-    memory_s = bytes_moved / hw.peak_hbm_bandwidth
+    compute_s = flops / peak_flops
+    memory_s = bytes_moved / bandwidth
     if compute_s >= memory_s:
         return compute_s, "compute"
     return memory_s, "memory"

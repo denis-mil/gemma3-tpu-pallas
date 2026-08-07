@@ -217,5 +217,30 @@
   window — survives a single geometry and dies under a sweep: intensity is flat in `W`
   whenever `W ≤ B`. The closed form is `I = L·B/(R+k)`, which reduces to **≈ B**. A
   hypothesis confirmed at one point is confirmed at one point.
+- **The MLP's weights are read once per `t` step, not once — and the first byte count said
+  once.** The grid is `(tokens // block_t, hidden_dim // block_h)` with the hidden axis
+  innermost, and the `w_*` `index_map`s vary in the *inner* index. So one `t` step walks
+  every hidden block, and when that index resets for the next `t` step, block 0 is no
+  longer the previously fetched slice — copy elision skips only *consecutive* identical
+  slices, so it cannot bridge the reset. At `T=256, block_t=128` that is two passes over
+  the weights: **193.5 MB and intensity 63**, not 97.9 MB and 125, which moves the kernel
+  from one side of `DEFAULT`'s ridge to the other. Generalise: the session-8 rule *an
+  intensity argument is only valid if every operand is in the byte count* extends to
+  **every visit**, not merely every operand — a byte count is over the grid, not over the
+  operand list. Both models are now in `shapes.mlp_bytes` (`elide_weights=` picks), because
+  the difference is a factor of `tokens // block_t` in the DMA count and therefore
+  something an xprof trace can decide; see
+  [measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md).
+- **An fp32-typed kernel is not an fp32-precision kernel.** `mlp.py` casts every operand to
+  fp32 and the docstring called it "fp32 throughout", which is true of the storage and
+  false of the arithmetic: on TPU, `precision=DEFAULT` truncates the multiplies to bf16 and
+  accumulates in fp32. So the kernel had no single compute roof — 197 TFLOP/s at `DEFAULT`,
+  a third of that at `HIGH`, a sixth at `HIGHEST`, since fp32 matmul is emulated with 3 or 6
+  bf16 passes. `roofline_bound` now takes `peak_flops` as a **required** keyword rather than
+  defaulting to the bf16 number, and no `peak_fp32_flops` constant was added: there is no
+  published one, and the whole point of the required keyword is that inventing it is the
+  mistake being prevented. The CPU-derived `GEMMA_RTOL = 1e-4` inherits the same defect and
+  is expected to fail on hardware, which is why the notebook reports the error instead of
+  asserting it.
 
 

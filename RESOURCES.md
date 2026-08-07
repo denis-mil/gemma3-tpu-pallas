@@ -168,11 +168,29 @@ practitioners. Nothing has been posted yet.
   passes on a 22.5 MiB predicted working set and that fact carries no information about
   the budget. Useful side effect: `uninitialized_memory` defaults to `nan`, which is why
   a missing accumulator init fails loudly rather than plausibly.
+  **Session 11 built the errand rather than answering it:** `bench.bench_kernel` records a
+  Mosaic VMEM failure as `status="failed"` with the compiler's message instead of raising,
+  so a `block_h` sweep at the default limit brackets the budget between the largest working
+  set that compiles and the smallest that does not — cell 4 of
+  [`notebooks/phase2_v5e.ipynb`](notebooks/phase2_v5e.ipynb). Two things that sharpen the
+  question: the headline working set is **23.25 MiB, not 22.5** (the 22.5 figure omits the
+  two `[block_t, block_h]` fp32 intermediates, 0.375 MiB each), and `pltpu.CompilerParams`
+  **does** carry `vmem_limit_bytes` on JAX 0.11.0, verified locally — so the limit is
+  sweepable per `pallas_call`, with no `LIBTPU_INIT_ARGS` and no runtime restart.
 - **Whether copy elision is contractual on the hardware path.** The docs state it as a
   property and two JAX-authored pipeline implementations honour it, but the `pallas_call`
   pipeline on TPU is emitted by the Mosaic compiler, out of reach from Python. An xprof
   DMA count on Colab would settle it — the highest-value single use of TPU time on this
   topic. **First candidate for a jax-ml/jax Discussions post.**
+  **Session 11 made the question quantitative.** For `fused_gated_mlp` the two answers are
+  not "elision or not" in the abstract: the `w_*` `index_map`s vary in the *innermost* grid
+  index, so elision cannot bridge the reset of that index between `t` steps, and the weight
+  traffic is `tokens // block_t` passes rather than one. At the headline geometry that is
+  2 versus 1 transfer per weight per call, 193.5 MB versus 97.9 MB, intensity 63 versus
+  125 — a difference large enough to move the kernel across `DEFAULT`'s ridge. Both counts
+  are computable (`shapes.mlp_bytes(..., elide_weights=)`), the prediction is registered in
+  [measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md), and cell 6 of the
+  notebook is the DMA count that decides it.
 - **`RevisitMode.ANY`** — documented only in `jax/_src/pallas/core.py`, rejected by
   lowering when `buffer_count > 1`, zero doc-page coverage. **Session 7 removed its most
   likely motivation without finding a replacement:** a shrunk grid does *not* need it,

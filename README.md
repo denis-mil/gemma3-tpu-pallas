@@ -7,6 +7,13 @@ shapes [Gemma 3 1B](https://huggingface.co/google/gemma-3-1b-it) runs, on a sing
 mode on CPU. It has never run on a TPU, and no performance number exists.** The rest of the
 roadmap below is a plan, not a claim.
 
+The measurement is built but not taken: [`notebooks/phase2_v5e.ipynb`](notebooks/phase2_v5e.ipynb)
+drives an on-device correctness check, a VMEM sweep, a token sweep against XLA and a profiler
+trace, with the benchmark logic in [`bench.py`](src/gemma3_pallas/bench.py) so that all of it is
+green on CPU first. The predictions it will be scored against are registered in advance in
+[measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md) — including one point that
+is registered as *unresolvable*, so it cannot be scored after the fact.
+
 📖 **[Lessons and reference sheets →](https://denis-mil.github.io/gemma3-tpu-pallas/)** — six
 lessons deriving the windowed-attention kernel from first principles, plus five reference sheets.
 Interactive; read them in a browser rather than as source.
@@ -51,7 +58,9 @@ Everything above lives in [`shapes.py`](src/gemma3_pallas/shapes.py) and is asse
 - [ ] **Phase 4** — stage 2: causal masking
 - [ ] **Phase 5** — stage 3: window block skipping via a shrunk grid and custom `index_map`,
       so out-of-window tiles are never DMA'd
-- [ ] **Phase 6** — benchmarks, roofline, profiler traces
+- [ ] **Phase 6** — benchmarks, roofline, profiler traces — *harness and notebook written and
+      CPU-green ([`bench.py`](src/gemma3_pallas/bench.py),
+      [`phase2_v5e.ipynb`](notebooks/phase2_v5e.ipynb)); no hardware run yet*
 - [ ] **Phase 7** — writeup
 
 ## How correctness and speed are separated
@@ -93,10 +102,19 @@ src/gemma3_pallas/
   shapes.py       Gemma 3 1B + TPU v5e constants, KV-cache and roofline arithmetic
   reference.py    pure-JAX fp32 ground truth (GeGLU MLP, MQA attention, masks)
   mlp.py          Phase 2 — the fused gated-MLP Pallas kernel
+  bench.py        timing, sweeps and roofline summaries — CPU-tested under interpret
 tests/            reference correctness + Pallas interpret-mode smoke and kernel tests
+notebooks/        Colab drivers; thin, because the logic they call is tested locally
 docs/adr/         why the target, scope and workflow are what they are
+docs/measurements/  predictions registered before a hardware run, verdicts after it
 CONTEXT.md        glossary — the project's canonical vocabulary
 ```
+
+Two defaults are deliberately unhelpful, because the helpful version fails quietly:
+`fused_gated_mlp(interpret=...)` defaults to **`False`**, so a forgotten argument raises on a
+CPU box rather than timing the emulator; and `roofline_bound` requires `peak_flops`
+explicitly, because v5e publishes only a bf16 peak and an fp32 kernel runs against that
+divided by however many bf16 passes its `precision` costs.
 
 ## Reading
 
