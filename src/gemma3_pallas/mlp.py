@@ -97,6 +97,15 @@ def fused_gated_mlp(
     setting is close to a no-op, which is why the local tests can check that it
     threads through but not what it costs.
 
+    On TPU with jax 0.11.0, `HIGH` **does not lower**: Mosaic's `dot_general`
+    rule has branches for `DEFAULT` and `HIGHEST` and raises
+    `NotImplementedError: Unsupported dot precision: HIGH` for anything else.
+    The `#tpu.contract_precision<bf16x3>` branch that accepts it is on jax
+    `main` and in no release. It is left threaded through here rather than
+    rejected up front, so the failure stays the compiler's own message and
+    disappears by itself on a jax that carries the branch. `interpret=True`
+    accepts all three, because it never reaches Mosaic.
+
     `compiler_params` goes straight to `pallas_call`; on TPU that is
     `pltpu.CompilerParams`, whose `vmem_limit_bytes` is how `bench.py` sweeps
     the VMEM budget without restarting the runtime.

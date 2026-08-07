@@ -312,7 +312,14 @@ def test_precision_threads_through_the_kernel(precision):
 
     On CPU these are near no-ops -- the divergence they cause is a TPU fact, and
     the notebook is what measures it. What is under test here is that
-    `precision` reaches all three `jnp.dot` calls without a lowering error.
+    `precision` reaches all three `jnp.dot` calls.
+
+    It is *not* evidence that a precision lowers on hardware. `interpret=True`
+    never reaches Mosaic, and `HIGH` passing here is exactly what made the v5e
+    notebook's first run fail with `NotImplementedError: Unsupported dot
+    precision: HIGH` -- jax 0.11.0's Mosaic `dot_general` rule has branches for
+    `DEFAULT` and `HIGHEST` only. Whether a precision is lowerable is a
+    hardware-path question and only a TPU can answer it.
     """
     x, w_gate, w_up, w_down = bench.operands(16, cfg=SMALL)
     got = fused_gated_mlp(
