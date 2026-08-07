@@ -4,8 +4,10 @@
 # Pallas kernels are developed and correctness-tested locally under interpret
 # mode, which runs pallas_call as a jitted scan over the grid on CPU.
 #
-# Performance work happens on Colab TPU v5e, which provides its own JAX build --
-# do NOT pip install jax in the Colab TPU runtime, it will break libtpu.
+# Performance work happens on Colab TPU v5e. The runtime ships its own JAX build,
+# older than this file asks for, so the notebook upgrades it with `jax[tpu]` in
+# its first cell and restarts the session; the package itself installs
+# `--no-deps` so nothing downstream disturbs that.
 #
 # Python 3.12 to match the Colab runtime (3.12.x).
 

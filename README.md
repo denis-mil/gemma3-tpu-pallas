@@ -92,8 +92,10 @@ pytest
 
 Python 3.12 matches the Colab runtime (3.12.13). Verified on JAX 0.11.0, CPU backend.
 
-> On a Colab TPU runtime, do **not** `pip install jax` — the runtime ships its own build and
-> reinstalling it breaks `libtpu`.
+> A Colab TPU runtime ships JAX 0.7.2, which predates
+> `jax._src.pallas.mosaic.tpu_info`. `notebooks/phase2_v5e.ipynb` upgrades it with
+> `pip install -U "jax[tpu]>=0.11.0"` in its first cell — `jax[tpu]`, so `libtpu`
+> moves with it — and the session then needs a restart.
 
 ## Layout
 
