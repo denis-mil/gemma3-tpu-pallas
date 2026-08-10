@@ -199,8 +199,23 @@
    ticked. Two things the session settled and one it could not: the accumulator has two
    distinguishable failure modes (rule above), `InterpretParams` models no VMEM capacity
    (rule above, and `RESOURCES.md`), and therefore **the 22.5 MiB block-size prediction
-   remains unverified** — it is now a Colab errand, not a local one. No lesson was written:
-   the friction was real but it produced rules for this file, not a predicate he lacks.
+   could not be verified locally** — it became a Colab errand, not a local one. No lesson was
+   written: the friction was real but it produced rules for this file, not a predicate he
+   lacks.
+
+   **The errand was run**, on a v5e on 2026-08-07 and again end to end on 2026-08-10; every
+   registered prediction is scored in
+   [measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md), which holds the
+   numbers and is not restated here. What the block-size question itself returned: the
+   bracket never had to be narrowed, because **the compiler names its own limit** —
+   *"Scoped allocation with size 22.50M and limit 16.00M exceeded scoped vmem limit by
+   6.50M"* — so a default that is not published anywhere is one failed compile away from
+   being read off. `vmem_limit_bytes` moves that boundary without a runtime restart, and
+   `block_h=6912` fitting under 100 MiB confirms the section-4 single-buffering rule from the
+   other side: its 91.12 MiB of weights fit only because a one-step grid axis gets one buffer,
+   where two would ask 184.50 MiB and fit nowhere on the chip. Generalise: *when a tool's
+   default is undocumented, the cheapest instrument for it is the error message it raises when
+   you exceed it.*
 
 ## Corrections this workspace has made to itself
 

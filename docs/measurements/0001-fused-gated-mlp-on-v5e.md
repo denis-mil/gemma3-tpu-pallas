@@ -160,8 +160,70 @@ The TFLOP/s column is **hardware** work, comparable to 197 and to nothing else. 
 `HIGHEST` row at T=2048 is 175.3 TFLOP/s of bf16 passes and 29.2 TFLOP/s of the matmul
 Gemma asked for; divide by the pass count to move between them.
 
-The `DEFAULT` column is the honest bad news of the pinned geometry, and section 5b of the
-notebook — measurement 0002 — is where it stops being the kernel's number.
+The `DEFAULT` column is the honest bad news of the pinned geometry, and the next section is
+where it stops being the kernel's number.
+
+## The pinned block is not the kernel's best geometry
+
+The token sweep above holds `block_t` at 128 while `T` grows, which is what isolates the cost
+of re-streaming the weights — and also why it cannot see a crossover: with `block_t` pinned,
+`T` cancels out of the intensity exactly and every row sits at I = 63.2. The byte model has
+one term under our control and only one: `mlp_bytes` does not depend on `block_h` at all, as
+the Geometry section above records. So hold `T = 2048` and `DEFAULT` and sweep `block_t`
+instead. The registration for that sweep is the table committed under `### 5b` in `d177fe5`,
+2026-08-07 12:25 PDT, about ninety minutes before the first run that scored it. The notebook's
+5b prose was rewritten afterwards and no longer carries that table, so the predicted columns
+below are quoted from `git show d177fe5:notebooks/phase2_v5e.ipynb` rather than from the
+notebook's current text — the same rule this document applies to itself with `b40bee8^`.
+
+Fixed for every row: `T = 2048`, `block_h = 384`, `DEFAULT`, `vmem_limit_bytes = 64 MiB`.
+
+| `block_t` | bytes | I | roof | binds | measured | % of roof | gain over previous |
+|---|---|---|---|---|---|---|---|
+| 128 | 1547.7 MB | 63.2 | 1890 us | memory | 2.320 ms | 81.5 | — |
+| 256 | 783.3 MB | 124.9 | 956 us | memory | 1.256 ms | 76.2 | 1.85x |
+| 512 | 401.1 MB | 244.0 | 497 us | compute | 0.802 ms | 62.0 | 1.57x |
+| 1024 | 210.0 MB | 466.0 | 497 us | compute | 0.764 ms | 65.0 | 1.05x |
+| 2048 | 114.4 MB | 855.1 | 497 us | compute | 0.776 ms | 64.0 | 0.98x |
+| XLA | — | — | — | — | 0.795 ms | — | — |
+
+The registration named both ways it could fail, and they point in opposite directions: a
+kernel that keeps improving past `block_t=512` falsifies the byte model, and one that never
+improves falsifies the diagnosis. **Neither fired.** The kernel gains 1.85x and 1.57x across
+the two memory-bound halvings and then stops — 1.05x into 1024 and a 1.6% regression at 2048
+— against byte counts that keep halving throughout. The curve flattens where the roofs cross
+and not before, and the minimum is interior: 1024, not the largest block available. The last
+row has an explanation the sweep does not isolate, so it is offered rather than measured: at
+`block_t = 2048` the `t` axis is one step long, so by the single-buffering rule prediction 3
+confirms, `x` and the output get one buffer each and there is nothing left to overlap the
+first fetch against.
+
+**The sign of the comparison against XLA depends on the block, not on the kernel.** Same `T`,
+same precision, same `block_h`:
+
+| | ms | vs XLA |
+|---|---|---|
+| kernel, `block_t=128` (the token sweep's pinned geometry) | 2.320 | 0.34x |
+| kernel, `block_t=1024` | 0.764 | **1.04x** |
+| XLA | 0.795 | — |
+
+A factor of 3.0 between two rows of the same kernel. The `DEFAULT` rows above are therefore
+one geometry measured at five sizes, not the kernel's result, and section 7 of the notebook
+prints the best `block_t` row beside them for exactly that reason. The comparison is not
+quite like for like either, and the difference favours XLA: XLA materialises both
+`[T, hidden_dim]` intermediates in HBM, so it moves bytes this model does not describe, and
+it reads the weights once regardless — the kernel at `block_t=1024` still reads them twice.
+
+Two caveats on the table:
+
+- **Every time in it is wall clock**, from `bench.time_call`, and prediction 4 below finds
+  roughly 233 us per call of host dispatch inside it at T=256. If that overhead is constant
+  in the geometry — which was not measured — the flat region sits nearer 90% of its roof than
+  the 65% printed. The verdict does not turn on it: this is a claim about where the curve
+  bends, and a constant offset does not move a bend.
+- **`vmem_limit_bytes = 64 MiB` on every row, including the ones that fit in the default 16.**
+  The largest geometry asks 28.12 MiB of scoped VMEM and would not otherwise compile. Raising
+  the limit only where it is needed would put a second variable in the sweep.
 
 ## Registered prediction 2 — the on-device error
 

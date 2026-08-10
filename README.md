@@ -3,16 +3,30 @@
 Custom TPU kernels written in [Pallas](https://docs.jax.dev/en/latest/pallas/), benchmarked at the exact
 shapes [Gemma 3 1B](https://huggingface.co/google/gemma-3-1b-it) runs, on a single TPU v5e.
 
-**Status: the first kernel is written — the fused gated-MLP (Phase 2), correct under interpret
-mode on CPU. It has never run on a TPU, and no performance number exists.** The rest of the
-roadmap below is a plan, not a claim.
+**Status: the first kernel is written and measured — the fused gated-MLP (Phase 2), correct on a
+TPU v5e.** The attention phases below are still a plan, not a claim.
 
-The measurement is built but not taken: [`notebooks/phase2_v5e.ipynb`](notebooks/phase2_v5e.ipynb)
-drives an on-device correctness check, a VMEM sweep, a token sweep against XLA and a profiler
-trace, with the benchmark logic in [`bench.py`](src/gemma3_pallas/bench.py) so that all of it is
-green on CPU first. The predictions it will be scored against are registered in advance in
-[measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md) — including one point that
-is registered as *unresolvable*, so it cannot be scored after the fact.
+[`notebooks/phase2_v5e.ipynb`](notebooks/phase2_v5e.ipynb) drives an on-device correctness check,
+a VMEM sweep, a token sweep against XLA, a `block_t` sweep and a profiler trace, with the
+benchmark logic in [`bench.py`](src/gemma3_pallas/bench.py) so that all of it is green on CPU
+first. The predictions it was scored against were registered before any hardware time, in
+[measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md) — including one point
+registered as *unresolvable*, so it could not be scored after the fact.
+
+What the two v5e sessions established:
+
+- **Correct on device.** Max absolute error 9.636e-3 at `DEFAULT` precision and 2.050e-5 at
+  `HIGHEST`, against an output scale of 2.152. `DEFAULT` truncates the multiplies to bf16, so the
+  CPU interpret run's 3.28e-6 does not transfer and is not asserted.
+- **Level with XLA at its best geometry.** At `T=2048`, `DEFAULT`: 0.764 ms at `block_t=1024`,
+  **1.04x** XLA's 0.795 ms — and 2.320 ms, 0.34x, at the `block_t=128` the token sweep pins.
+  Same kernel, a factor of 3.0 apart; the block is the result. At `HIGHEST` the kernel is within
+  6% of XLA at every `T`.
+- **A `pallas_call` gets 16 MiB of scoped VMEM by default**, not the chip's 128, and
+  `vmem_limit_bytes` moves that boundary without a runtime restart.
+- **Copy elision does not bridge a grid-index reset.** The weights are re-read once per `t` step,
+  which the trace settles positionally: the DMA waits keep firing through the second `t` pass
+  instead of stopping halfway.
 
 📖 **[Lessons and reference sheets →](https://denis-mil.github.io/gemma3-tpu-pallas/)** — six
 lessons deriving the windowed-attention kernel from first principles, plus five reference sheets.
@@ -53,14 +67,16 @@ Everything above lives in [`shapes.py`](src/gemma3_pallas/shapes.py) and is asse
 - [x] **Phase 0** — local CPU environment, Pallas interpret mode verified working
 - [x] **Phase 1** — repo scaffolding, shape constants, fp32 references
 - [x] **Phase 2** — fused gated-MLP kernel *(warm-up; goal is understanding, parity with XLA is fine)* —
-      [`mlp.py`](src/gemma3_pallas/mlp.py), fp32, correct under both interpret modes. No hardware run yet.
+      [`mlp.py`](src/gemma3_pallas/mlp.py), correct under both interpret modes and on a v5e,
+      1.04x XLA at its best geometry ([measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md))
 - [ ] **Phase 3** — flash attention, stage 1: online softmax, no mask
 - [ ] **Phase 4** — stage 2: causal masking
 - [ ] **Phase 5** — stage 3: window block skipping via a shrunk grid and custom `index_map`,
       so out-of-window tiles are never DMA'd
-- [ ] **Phase 6** — benchmarks, roofline, profiler traces — *harness and notebook written and
-      CPU-green ([`bench.py`](src/gemma3_pallas/bench.py),
-      [`phase2_v5e.ipynb`](notebooks/phase2_v5e.ipynb)); no hardware run yet*
+- [ ] **Phase 6** — benchmarks, roofline, profiler traces — *harness and notebook
+      ([`bench.py`](src/gemma3_pallas/bench.py), [`phase2_v5e.ipynb`](notebooks/phase2_v5e.ipynb))
+      run end to end on a v5e for the MLP: correctness, VMEM and `block_t` sweeps, roofline and an
+      xprof trace. The attention kernel has none of it yet*
 - [ ] **Phase 7** — writeup
 
 ## How correctness and speed are separated

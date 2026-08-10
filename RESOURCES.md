@@ -153,9 +153,11 @@ practitioners. Nothing has been posted yet.
   that one"~~ — closed by
   [research 0001](docs/research/0001-pallas-grid-blockspec-index-map.md), which pins the
   copy-elision rule to `tpu/details.html` and demonstrates it by execution.
-- **The default value of `--xla_tpu_scoped_vmem_limit_kib`** — not the physical 128 MiB,
-  is what a kernel actually gets. `pltpu.CompilerParams` proves the flag governs the
-  budget but never states its default. Not in the JAX Python tree. **Session 10 made this
+- ~~**The default value of `--xla_tpu_scoped_vmem_limit_kib`**~~ — **16 MiB on v5e, read off
+  the compiler's own error message on a v5e; see
+  [measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md), prediction 3.** Not
+  the physical 128 MiB, and it is what a kernel actually gets. `pltpu.CompilerParams` proves
+  the flag governs the budget but never states its default. Not in the JAX Python tree. **Session 10 made this
   strictly a hardware question:** `pltpu.InterpretParams` models **no VMEM capacity at
   all**. Its twelve fields are `detect_races`, `out_of_bounds_reads`,
   `skip_floating_point_ops`, `uninitialized_memory`, `num_cores_or_threads`,
@@ -177,20 +179,34 @@ practitioners. Nothing has been posted yet.
   two `[block_t, block_h]` fp32 intermediates, 0.375 MiB each), and `pltpu.CompilerParams`
   **does** carry `vmem_limit_bytes` on JAX 0.11.0, verified locally — so the limit is
   sweepable per `pallas_call`, with no `LIBTPU_INIT_ARGS` and no runtime restart.
-- **Whether copy elision is contractual on the hardware path.** The docs state it as a
-  property and two JAX-authored pipeline implementations honour it, but the `pallas_call`
-  pipeline on TPU is emitted by the Mosaic compiler, out of reach from Python. An xprof
-  DMA count on Colab would settle it — the highest-value single use of TPU time on this
-  topic. **First candidate for a jax-ml/jax Discussions post.**
+  **The sweep never had to bracket anything.** The compiler names the number itself —
+  *"Scoped allocation with size 22.50M and limit 16.00M exceeded scoped vmem limit by
+  6.50M"* — so an undocumented default is one failed compile away from being read off, and
+  `vmem_limit_bytes` then moved it (`block_h=768` fails at 16 MiB, runs at 32; `block_h=6912`
+  fails through 64 and runs at 100) without a runtime restart, as predicted.
+- ~~**Whether copy elision is contractual on the hardware path**~~ — **closed on a v5e by
+  [measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md), prediction 4.** The
+  docs state it as a property and two JAX-authored pipeline implementations honour it, but
+  the `pallas_call` pipeline on TPU is emitted by the Mosaic compiler, out of reach from
+  Python, so only a trace could settle it.
   **Session 11 made the question quantitative.** For `fused_gated_mlp` the two answers are
   not "elision or not" in the abstract: the `w_*` `index_map`s vary in the *innermost* grid
   index, so elision cannot bridge the reset of that index between `t` steps, and the weight
   traffic is `tokens // block_t` reads rather than one. At the headline geometry that is
   2 versus 1 transfer per weight per call, 193.5 MB versus 97.9 MB, intensity 63 versus
   125 — a difference large enough to move the kernel across `DEFAULT`'s ridge. Both counts
-  are computable (`shapes.mlp_bytes(..., elide_weights=)`), the prediction is registered in
-  [measurement 0001](docs/measurements/0001-fused-gated-mlp-on-v5e.md), and cell 6 of the
-  notebook is the DMA count that decides it.
+  are computable (`shapes.mlp_bytes(..., elide_weights=)`) and the prediction was registered
+  before the run: **the re-read model held.**
+  **The instrument was not the one the prediction named**, which is the reusable part.
+  `Pallas Primitives` is **empty** in the capture even under
+  `tpu_trace_mode="TRACE_COMPUTE_AND_SYNC"`, so there is no row of named DMA events to tally.
+  What that mode does add is `Tensor Core Sync Flag`, where the transfers appear as the waits
+  that retire them — four flags, 18 waits each, 72 per call, identical across all five traced
+  calls. The decisive reading was **positional, not arithmetic**: under elision the second `t`
+  pass would fetch nothing, and instead exactly 36 of the 72 waits fall in each half of the
+  call. `device_duration_ps` on the trace's `XLA Modules` events is the other thing worth
+  taking from it: 258.5 us on the device against a 492 us wall-clock median at the same
+  geometry, so roughly 233 us per call is host dispatch that no roof accounts for.
 - **`RevisitMode.ANY`** — documented only in `jax/_src/pallas/core.py`, rejected by
   lowering when `buffer_count > 1`, zero doc-page coverage. **Session 7 removed its most
   likely motivation without finding a replacement:** a shrunk grid does *not* need it,
