@@ -35,6 +35,7 @@ import jax.numpy as jnp
 from .mlp import fused_gated_mlp
 from .reference import gated_mlp
 from .shapes import (
+    BF16_PASSES,
     GEMMA3_1B,
     V5E,
     Gemma3Config,
@@ -47,7 +48,9 @@ from .shapes import (
 # A measured intensity this close to the ridge cannot be called for either roof
 # by any timing this harness collects, so `summarise` refuses to call it and
 # says "at ridge" instead. `DEFAULT` precision at T=512 is the known case: it
-# lands ~1.4% above its ridge, which is inside the noise.
+# lands ~1.4% above the ridge, which is inside the noise. At `HIGHEST` the same
+# geometry is six passes of bf16 work over the same bytes, so it sits far past
+# the ridge and is scoreable.
 RIDGE_TOLERANCE = 0.02
 
 
@@ -148,6 +151,21 @@ def precision_label(precision) -> str:
     if isinstance(precision, str):
         return precision.upper()
     return getattr(precision, "name", str(precision))
+
+
+def passes_for(precision) -> int:
+    """bf16 passes a `PrecisionLike` costs on v5e, for the hardware FLOP count.
+
+    The adapter between `jax.lax.Precision` and `shapes.BF16_PASSES`, which is
+    kept jax-free. Raises rather than assuming 1 for a precision it does not
+    know -- a `DotAlgorithmPreset` is deliberately unmapped, and inventing a pass
+    count for a row that actually timed is how a table comes out six times wrong.
+    """
+    label = precision_label(precision)
+    try:
+        return BF16_PASSES[label]
+    except KeyError:
+        raise ValueError(f"no bf16 pass count known for precision {label!r}") from None
 
 
 def _compiler_params(vmem_limit_bytes: int | None):
@@ -309,16 +327,22 @@ def load(path) -> list[BenchResult]:
 def summarise(
     results: Sequence[BenchResult],
     *,
-    passes: int,
     cfg: Gemma3Config = GEMMA3_1B,
     hw: TpuV5e = V5E,
     elide_weights: bool = False,
 ) -> str:
-    """A text table: achieved GFLOP/s against the roof that binds at `passes`.
+    """A text table: achieved hardware GFLOP/s against the one published roof.
 
-    `passes` is the number of bf16 passes the measured precision costs -- it
-    selects the compute roof, and there is no default because inventing one is
-    the mistake `roofline_bound`'s required keyword exists to prevent.
+    The bf16 pass count is derived **per row**, from `r.precision`, so one table
+    can hold several precisions and none of them can be scored against the wrong
+    count. It used to be a table-level argument -- a second copy of a fact every
+    `BenchResult` already carries, which made `summarise(highest_rows, passes=1)`
+    a silently six-times-wrong table.
+
+    `GFLOP/s` and `I` are hardware rates: they count the bf16 passes an
+    fp32-precision matmul is emulated with, so they are comparable to the 197
+    TFLOP/s peak and *not* to a published model throughput. The `p` column is the
+    divisor between the two (ADR-0004).
 
     A row whose intensity is within `RIDGE_TOLERANCE` of the ridge prints as
     **at ridge** rather than as a verdict: the two roofs are within the noise
@@ -328,21 +352,29 @@ def summarise(
     `[tokens, hidden_dim]` intermediates in HBM, so `mlp_bytes` -- which is a
     model of *this kernel's* traffic -- does not describe it.
     """
-    peak = hw.peak_flops(passes)
-    ridge = hw.ridge_point(passes)
+    peak = hw.peak_flops
+    ridge = hw.ridge_point
 
     header = (
-        f"roof: {peak / 1e12:.1f} TFLOP/s at {passes} bf16 pass(es), "
+        f"roof: {peak / 1e12:.1f} TFLOP/s (v5e peak bf16, the only one), "
         f"bandwidth {hw.peak_hbm_bandwidth / 1e9:.0f} GB/s, ridge {ridge:.1f} FLOP/byte"
     )
+    legend = (
+        "GFLOP/s and I count hardware bf16 passes -- "
+        "divide by the p column for model FLOPs."
+    )
     columns = (
-        f"{'label':<7} {'T':>5} {'blk_t':>6} {'blk_h':>6} {'prec':<8} "
+        f"{'label':<7} {'T':>5} {'blk_t':>6} {'blk_h':>6} {'prec':<8} {'p':>2} "
         f"{'ms':>8} {'GFLOP/s':>9} {'I':>7} {'%roof':>7}  verdict"
     )
-    lines = [header, "", columns, "-" * len(columns)]
+    lines = [header, legend, "", columns, "-" * len(columns)]
 
-    kernel_ms: dict[int, float] = {}
-    xla_ms: dict[int, float] = {}
+    # Keyed by (precision, tokens), not by tokens: one table may now hold several
+    # precisions, and a kernel row is only comparable to the XLA row at the same
+    # precision. Keying on tokens alone would let HIGHEST quietly overwrite
+    # DEFAULT and print one set of ratios as though it were both.
+    kernel_ms: dict[tuple[str, int], float] = {}
+    xla_ms: dict[tuple[str, int], float] = {}
 
     for r in results:
         blk_t = "-" if r.block_t is None else str(r.block_t)
@@ -350,14 +382,15 @@ def summarise(
         if r.status != "ok" or r.median() is None:
             lines.append(
                 f"{r.label:<7} {r.tokens:>5} {blk_t:>6} {blk_h:>6} {r.precision:<8} "
-                f"{'-':>8} {'-':>9} {'-':>7} {'-':>7}  FAILED"
+                f"{'-':>2} {'-':>8} {'-':>9} {'-':>7} {'-':>7}  FAILED"
             )
             continue
 
         seconds = r.median()
-        flops = mlp_flops(r.tokens, cfg=cfg)
+        passes = passes_for(r.precision)
+        flops = mlp_flops(r.tokens, passes=passes, cfg=cfg)
         achieved = flops / seconds
-        (kernel_ms if r.label == "kernel" else xla_ms)[r.tokens] = seconds
+        (kernel_ms if r.label == "kernel" else xla_ms)[r.precision, r.tokens] = seconds
 
         if r.block_t is None:
             intensity_s, percent_s, verdict = "-", "-", "baseline"
@@ -378,7 +411,7 @@ def summarise(
 
         lines.append(
             f"{r.label:<7} {r.tokens:>5} {blk_t:>6} {blk_h:>6} {r.precision:<8} "
-            f"{1e3 * seconds:>8.3f} {achieved / 1e9:>9.1f} {intensity_s:>7} "
+            f"{passes:>2} {1e3 * seconds:>8.3f} {achieved / 1e9:>9.1f} {intensity_s:>7} "
             f"{percent_s:>7}  {verdict}"
         )
 
@@ -386,7 +419,10 @@ def summarise(
     if shared:
         lines.append("")
         lines.append("kernel vs XLA (>1 means the kernel is faster):")
-        for tokens in shared:
-            lines.append(f"  T={tokens:<6} {xla_ms[tokens] / kernel_ms[tokens]:.2f}x")
+        for key in shared:
+            precision, tokens = key
+            lines.append(
+                f"  {precision:<8} T={tokens:<6} {xla_ms[key] / kernel_ms[key]:.2f}x"
+            )
 
     return "\n".join(lines)

@@ -14,6 +14,13 @@ the weights are re-read once per `t` step, because copy elision only skips a
 transfer between *consecutive* identical slices and the reset of the inner index
 breaks that. `elide_weights=True` is the counterfactual, and the xprof DMA count
 is what adjudicates -- neither is measured yet.
+
+FLOP counts here are *hardware* counts, with the bf16 emulation pass count
+folded in (ADR-0004). The chip has one roof, 197 TFLOP/s, and one ridge; asking
+for more precision moves a kernel's intensity to the right rather than lowering
+the roof underneath it. `passes * I` against `P` is the same inequality as `I`
+against `P / passes`, which is why every crossover and every verdict below is
+the number it was under the old convention.
 """
 
 import dataclasses
@@ -40,17 +47,23 @@ from gemma3_pallas.shapes import (
 # The five token counts the notebook sweeps, and the intensity each one has when
 # the whole sequence is one `t` step (`block_t == tokens`, so the weights are
 # read once). Registered before the run; ±0.5 FLOP/byte.
-REGISTERED_INTENSITY = {128: 63.2, 256: 124.9, 512: 244.0, 1024: 466.0, 2048: 855.1}
+#
+# These are the *one-pass* intensities, and they are left at their registered
+# values on purpose. `docs/measurements/0001` quotes this table as a prediction
+# made before any hardware time; rescaling a registered number after the fact is
+# what this workspace forbids. The pass count inverting means the name has to say
+# which convention the numbers are in -- not that the numbers move.
+REGISTERED_INTENSITY_1_PASS = {128: 63.2, 256: 124.9, 512: 244.0, 1024: 466.0, 2048: 855.1}
 
 # Small enough to run in interpret mode in well under a second, and not Gemma's
 # shape, so nothing in the harness can be shape-hardcoded.
 SMALL = Gemma3Config(embed_dim=128, hidden_dim=256)
 
 
-def _intensity(tokens, *, block_t=None, cfg=GEMMA3_1B, elide_weights=False):
+def _intensity(tokens, *, passes, block_t=None, cfg=GEMMA3_1B, elide_weights=False):
     block_t = tokens if block_t is None else block_t
     return arithmetic_intensity(
-        mlp_flops(tokens, cfg=cfg),
+        mlp_flops(tokens, passes=passes, cfg=cfg),
         mlp_bytes(tokens, block_t=block_t, cfg=cfg, elide_weights=elide_weights),
     )
 
@@ -60,10 +73,24 @@ def _intensity(tokens, *, block_t=None, cfg=GEMMA3_1B, elide_weights=False):
 # --------------------------------------------------------------------------
 
 
-def test_mlp_flops_matches_a_hand_count():
-    """Three matmuls of T x E x H, two FLOPs each: 6*T*E*H, counted by hand."""
+@pytest.mark.parametrize("passes", [1, 3, 6])
+def test_mlp_flops_requires_an_explicit_pass_count(passes):
+    """Three matmuls of T x E x H, two FLOPs each, once per bf16 pass.
+
+    No call site may inherit a pass count. "How many FLOPs is this matmul" has
+    no dtype-free answer on a chip with no fp32 MXU: v5e emulates an
+    fp32-precision multiply with 3 or 6 bf16 passes, so a default of 1 would
+    understate a `HIGHEST` kernel's work by 6x. The compute roof, by contrast,
+    *does* have a single published value, which is why `roofline_bound` gets a
+    default and this does not.
+    """
     cfg = Gemma3Config(embed_dim=128, hidden_dim=256)
-    assert mlp_flops(8, cfg=cfg) == 6 * 8 * 128 * 256
+    assert mlp_flops(8, passes=passes, cfg=cfg) == passes * 6 * 8 * 128 * 256
+
+    with pytest.raises(TypeError):
+        mlp_flops(8, cfg=cfg)
+    with pytest.raises(ValueError):
+        mlp_flops(8, passes=0, cfg=cfg)
 
 
 def test_mlp_bytes_counts_weights_activations_and_output():
@@ -86,15 +113,15 @@ def test_mlp_bytes_doubles_the_weights_when_block_t_halves_tokens():
     weights = 3 * 128 * 256 * 4
     activations = 2 * 16 * 128 * 4
 
-    one_pass = mlp_bytes(16, block_t=16, cfg=cfg)
-    two_passes = mlp_bytes(16, block_t=8, cfg=cfg)
+    one_read = mlp_bytes(16, block_t=16, cfg=cfg)
+    two_reads = mlp_bytes(16, block_t=8, cfg=cfg)
 
-    assert one_pass == weights + activations
-    assert two_passes == 2 * weights + activations
-    assert two_passes - one_pass == weights
+    assert one_read == weights + activations
+    assert two_reads == 2 * weights + activations
+    assert two_reads - one_read == weights
 
 
-def test_elide_weights_recovers_the_single_pass_count():
+def test_elide_weights_recovers_the_single_read_count():
     """The counterfactual the DMA count adjudicates against."""
     cfg = Gemma3Config(embed_dim=128, hidden_dim=256)
     assert mlp_bytes(16, block_t=8, cfg=cfg, elide_weights=True) == mlp_bytes(
@@ -104,8 +131,21 @@ def test_elide_weights_recovers_the_single_pass_count():
 
 def test_registered_intensity_table():
     """The prediction, in a test rather than only in prose."""
-    for tokens, expected in REGISTERED_INTENSITY.items():
-        assert _intensity(tokens) == pytest.approx(expected, abs=0.5)
+    for tokens, expected in REGISTERED_INTENSITY_1_PASS.items():
+        assert _intensity(tokens, passes=1) == pytest.approx(expected, abs=0.5)
+
+
+def test_the_pass_count_lands_in_the_intensity():
+    """The whole geometric content of ADR-0004, in one assertion.
+
+    The pass count now multiplies the numerator of `flops / bytes`, so asking
+    for `HIGHEST` slides a kernel six times to the right on the roofline. It
+    moves not one byte -- which is exactly why intensity is a fact about a
+    kernel *as executed*, precision included, and not about its algebra alone.
+    """
+    for tokens, one_pass in REGISTERED_INTENSITY_1_PASS.items():
+        assert _intensity(tokens, passes=3) == pytest.approx(3 * one_pass, abs=1.5)
+        assert _intensity(tokens, passes=6) == pytest.approx(6 * one_pass, abs=3.0)
 
 
 @pytest.mark.parametrize(
@@ -117,22 +157,28 @@ def test_registered_intensity_table():
     ],
 )
 def test_crossovers_match_the_registered_table(passes, hbm_bound, compute_bound):
-    """Which side of its ridge each token count falls on, per precision.
+    """Which side of the ridge each token count falls on, per precision.
 
-    Asserted against `ridge_point(passes)` rather than against literals, so a
+    Asserted against `V5E.ridge_point` rather than against literals, so a
     corrected hardware constant moves the test with it instead of leaving a
     stale number to be argued with.
 
+    The data here is unchanged from when the pass count divided the roof, and
+    that is the point: it is the same crossover at the same token count for the
+    same precision, because `passes * I > P / beta` is the same inequality as
+    `I > (P / passes) / beta`. Only which side of it scales has moved. What used
+    to be three roofs with fixed points is now one roof with points that slide.
+
     The interesting rows are the ones the obvious reading gets wrong. `HIGH` (3
     passes) is *not* compute-bound everywhere: at T=128 the kernel sits 21%
-    below its ridge, so it has a crossover of its own between 128 and 256 -- and
+    below the ridge, so it has a crossover of its own between 128 and 256 -- and
     that margin makes it a better test of the byte model than `DEFAULT`'s.
     """
-    ridge = V5E.ridge_point(passes)
+    ridge = V5E.ridge_point
     for tokens in hbm_bound:
-        assert _intensity(tokens) < ridge
+        assert _intensity(tokens, passes=passes) < ridge
     for tokens in compute_bound:
-        assert _intensity(tokens) > ridge
+        assert _intensity(tokens, passes=passes) > ridge
 
 
 def test_default_precision_ridge_is_unresolvable_at_512():
@@ -143,31 +189,53 @@ def test_default_precision_ridge_is_unresolvable_at_512():
     reading the dice. Pinning it here means a later change that moves the ridge
     has to confront the claim rather than silently make it scoreable.
     """
-    assert abs(_intensity(512) / V5E.ridge_point(1) - 1) < 0.02
+    assert abs(_intensity(512, passes=1) / V5E.ridge_point - 1) < 0.02
 
 
-def test_roofline_bound_requires_an_explicit_peak():
-    """No call site may inherit a compute roof: v5e publishes only a bf16 one."""
-    with pytest.raises(TypeError):
-        roofline_bound(flops=int(1e12), bytes_moved=int(1e9))
+def test_the_roof_is_a_single_published_constant():
+    """v5e has one compute peak, and after ADR-0004 nothing divides it.
+
+    `peak_flops` is the roofline vocabulary word -- `P` in `min(P, I * beta)` --
+    and it is now an alias of the published bf16 field rather than a function of
+    a pass count. The pass count is a property of the work, so it lives in the
+    FLOP count; there was never a chip with a 32.8 TFLOP/s roof.
+    """
+    assert V5E.peak_flops == V5E.peak_bf16_flops == 197e12
+    assert V5E.ridge_point == pytest.approx(V5E.peak_flops / V5E.peak_hbm_bandwidth)
+    assert V5E.ridge_point == pytest.approx(240.5, abs=0.1)
 
 
-def test_peak_flops_divides_by_passes():
-    """fp32 on TPU is emulated with 3 or 6 bf16 passes, so the roof divides."""
-    assert V5E.peak_flops(1) == V5E.peak_bf16_flops
-    assert V5E.peak_flops(3) == pytest.approx(V5E.peak_bf16_flops / 3)
-    assert V5E.peak_flops(6) == pytest.approx(V5E.peak_bf16_flops / 6)
-    with pytest.raises(ValueError):
-        V5E.peak_flops(0)
+def test_roofline_bound_defaults_to_the_published_peak():
+    """Both roofs now have safe defaults, because both are published numbers."""
+    assert roofline_bound(int(1e12), int(1e9)) == roofline_bound(
+        int(1e12), int(1e9), peak_flops=V5E.peak_bf16_flops
+    )
 
 
-def test_ridge_point_tracks_the_peak():
-    """More precision lowers the ridge, so a kernel goes compute-bound sooner."""
-    for passes in (1, 3, 6):
-        assert V5E.ridge_point(passes) == pytest.approx(
-            V5E.peak_flops(passes) / V5E.peak_hbm_bandwidth
-        )
-    assert V5E.ridge_point(1) > V5E.ridge_point(3) > V5E.ridge_point(6)
+@pytest.mark.parametrize("tokens", sorted(REGISTERED_INTENSITY_1_PASS))
+@pytest.mark.parametrize("passes", [1, 3, 6])
+def test_moving_the_pass_count_changes_no_prediction(tokens, passes):
+    """The anchor: inverting the convention is a change of variables, not of physics.
+
+    Left side is the current convention -- the pass count multiplies the FLOPs
+    and the roof is the one published peak. Right side is the convention this
+    workspace used to hold, written out inline: algebraic FLOPs against a roof
+    divided by the pass count. They agree to the bit, in seconds *and* in which
+    roof binds, at every token count and every precision.
+
+    That is why deleting `peak_flops(passes)` was safe, and it is why every
+    verdict registered in `docs/measurements/0001` still reads true. The old
+    divisor survives here, as a test fixture rather than as API.
+    """
+    moved = mlp_bytes(tokens, block_t=tokens)
+
+    now = roofline_bound(mlp_flops(tokens, passes=passes), moved)
+    before = roofline_bound(
+        mlp_flops(tokens, passes=1), moved, peak_flops=197e12 / passes
+    )
+
+    assert now[0] == pytest.approx(before[0])
+    assert now[1] == before[1]
 
 
 # --------------------------------------------------------------------------
@@ -346,9 +414,117 @@ def test_summarise_names_the_roof_and_flags_the_ridge():
         at_ridge, tokens=2048, block_t=2048, times_s=(4e-3,)
     )
 
-    text = bench.summarise([at_ridge], passes=1)
+    text = bench.summarise([at_ridge])
     assert "at ridge" in text
     assert "HBM-bound" not in text and "compute-bound" not in text
 
-    text = bench.summarise([compute_bound], passes=1)
+    text = bench.summarise([compute_bound])
     assert "compute-bound" in text
+
+    # The same geometry at HIGHEST is six passes of bf16 work over the same
+    # bytes, so I = 1464 -- nowhere near the ridge, and no longer unscoreable.
+    # If the per-row pass count did not reach the verdict this would still say
+    # "at ridge", so this is what pins the derivation end to end.
+    text = bench.summarise([dataclasses.replace(at_ridge, precision="HIGHEST")])
+    assert "at ridge" not in text
+    assert "compute-bound" in text
+
+
+def test_summarise_derives_the_pass_count_from_the_row():
+    """One table, one roof, two precisions -- the count comes off each row.
+
+    `summarise` used to take a table-level `passes`, which was a second copy of
+    a fact every `BenchResult` already carries, and `summarise(highest_rows,
+    passes=1)` printed a silently wrong table. Deriving it per row makes that
+    unrepresentable, and it lets one table hold both precisions -- which is the
+    story the single-roof plot now tells.
+    """
+    default = bench.BenchResult(
+        label="kernel",
+        tokens=2048,
+        block_t=2048,
+        block_h=768,
+        precision="DEFAULT",
+        vmem_limit_bytes=None,
+        status="ok",
+        times_s=(4e-3,),
+        error=None,
+    )
+    highest = dataclasses.replace(default, precision="HIGHEST")
+
+    text = bench.summarise([default, highest])
+    rows = [line.split() for line in text.splitlines() if line.startswith("kernel")]
+    assert len(rows) == 2
+    default_row, highest_row = rows
+
+    # prec, p, ms, GFLOP/s, I -- the last two scale by exactly the pass count.
+    assert (default_row[4], default_row[5]) == ("DEFAULT", "1")
+    assert (highest_row[4], highest_row[5]) == ("HIGHEST", "6")
+    assert default_row[6] == highest_row[6]  # same milliseconds
+    assert float(highest_row[7]) == pytest.approx(6 * float(default_row[7]), rel=1e-3)
+    assert float(highest_row[8]) == pytest.approx(6 * float(default_row[8]), rel=1e-3)
+
+    # One roof, named once. 32.8 was the six-pass roof of the old convention.
+    assert "197.0" in text
+    assert "32.8" not in text
+
+
+def test_summarise_compares_kernel_to_xla_within_a_precision():
+    """A kernel row is only comparable to the XLA row at the same precision.
+
+    One table can now hold both, so the ratio block is keyed on (precision,
+    tokens). Keyed on tokens alone -- which is what it was when each precision
+    got its own table -- HIGHEST would overwrite DEFAULT and one set of ratios
+    would be printed as though it were both.
+    """
+    kernel = bench.BenchResult(
+        label="kernel",
+        tokens=2048,
+        block_t=2048,
+        block_h=768,
+        precision="DEFAULT",
+        vmem_limit_bytes=None,
+        status="ok",
+        times_s=(4e-3,),
+        error=None,
+    )
+    xla = dataclasses.replace(kernel, label="xla", block_t=None, block_h=None)
+    rows = [
+        kernel,
+        xla,
+        dataclasses.replace(kernel, precision="HIGHEST", times_s=(8e-3,)),
+        dataclasses.replace(xla, precision="HIGHEST", times_s=(4e-3,)),
+    ]
+
+    ratios = [
+        line.split() for line in bench.summarise(rows).splitlines() if "x" == line[-1:]
+    ]
+    assert ratios == [
+        ["DEFAULT", "T=2048", "1.00x"],
+        ["HIGHEST", "T=2048", "0.50x"],
+    ]
+
+
+def test_summarise_rejects_a_timed_row_whose_precision_has_no_pass_count():
+    """A `DotAlgorithmPreset` label is deliberately unmapped, so it must raise.
+
+    A row that actually timed and whose pass count is unknown cannot be scored
+    against any roof -- inventing 1 for it is the failure this whole change is
+    about. Rows that *failed* print `-` everywhere and never ask.
+    """
+    timed = bench.BenchResult(
+        label="kernel",
+        tokens=512,
+        block_t=512,
+        block_h=768,
+        precision="BF16_BF16_F32_X3",
+        vmem_limit_bytes=None,
+        status="ok",
+        times_s=(1e-3,),
+        error=None,
+    )
+    with pytest.raises(ValueError, match="BF16_BF16_F32_X3"):
+        bench.summarise([timed])
+
+    failed = dataclasses.replace(timed, status="failed", times_s=(), error="nope")
+    assert "FAILED" in bench.summarise([failed])

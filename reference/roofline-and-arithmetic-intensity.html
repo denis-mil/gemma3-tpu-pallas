@@ -33,9 +33,9 @@
   </p>
 
   <p class="sidenote">
-    <b>I</b> is a property of the algorithm <i>and its schedule</i>; <b>I*</b> is a property of
-    the chip alone. Changing <code>BlockSpec</code>s changes <b>I</b>. That is the whole reason
-    a roofline is actionable rather than descriptive.
+    <b>I</b> is a property of the algorithm, <i>its schedule</i>, and <i>the precision you asked
+    for</i>; <b>I*</b> is a property of the chip alone. Changing <code>BlockSpec</code>s changes
+    <b>I</b>. That is the whole reason a roofline is actionable rather than descriptive.
   </p>
 
   <h2>TPU v5e constants</h2>
@@ -63,6 +63,21 @@
     i.e. 16 <i>GiB</i>, so its GB/GiB labelling is loose. <b>Take 820e9 and carry 229–241 as the
     ridge's range.</b> Then check whether the range changes your answer — at any sane block size
     it does not, and saying that is a stronger claim than quoting one constant.</p>
+  </div>
+
+  <div class="warn">
+    <span class="note-label">Trap · which FLOPs?</span>
+    <p>v5e has <b>no fp32 matmul unit</b>. An fp32-<i>precision</i> matmul is emulated with three
+    or six bf16 passes — <code>jax.lax.DotAlgorithmPreset</code> calls them
+    <code>BF16_BF16_F32_X3</code> and <code>_X6</code> — and those passes are work the chip
+    actually does. So count them: <b>P stays at 197 TFLOP/s</b> and the <i>FLOP count</i>
+    multiplies by the pass count, which moves the point <b>right and up</b> rather than lowering
+    the roof underneath it.</p>
+    <p>Nothing about the verdict changes — <code>6I</code> against <code>P</code> is the same
+    inequality as <code>I</code> against <code>P/6</code> — but the achieved rate you compute this
+    way is <b>hardware</b> FLOP/s, comparable to 197 and <i>not</i> comparable to a published
+    model throughput. Divide by the pass count to convert. This page never had to say so because
+    every kernel on it is bf16: one pass, so the two counts coincide.</p>
   </div>
 
   <h2>Both roofs, offline, in two lines</h2>

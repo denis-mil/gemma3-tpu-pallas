@@ -6,11 +6,27 @@ to this module.
 
 Model values are taken from the published `gemma-3-1b-it` config.json.
 Hardware values are TPU v5e per-chip spec.
+
+**FLOP counts here are hardware counts** -- the work the MXU issues, not the work
+the algebra specifies (ADR-0004). v5e has no fp32 matmul unit, so an
+fp32-*precision* matmul is emulated with 3 or 6 bf16 passes, and the counters
+below take a `passes` argument that multiplies their result. The chip has one
+compute roof, 197 TFLOP/s, and one ridge, 240.5 FLOP/byte; the pass count lives
+in the numerator because it is a property of the work, not of the hardware.
+
+Nothing is predicted differently for it: `passes * I` against `P` is the same
+inequality as `I` against `P / passes`, so every bound verdict and every
+predicted time is what it was when the pass count divided the roof instead. What
+changes is that arithmetic intensity now scales with precision, and that an
+achieved rate computed from these counts is comparable to 197 rather than to a
+published model throughput. Divide by the pass count to get from one to the other.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -80,66 +96,107 @@ class TpuV5e:
     hbm_bytes: int = 16 * 1024**3
     mxu_dim: int = 128  # v6e/Trillium is 256 -- block sizes do not port
 
-    def peak_flops(self, passes: int = 1) -> float:
-        """Effective compute roof when each multiply costs `passes` bf16 passes.
+    @property
+    def peak_flops(self) -> float:
+        """The compute roof -- `P` in `min(P, I * beta)`. One published number.
 
         There is no published fp32 peak for v5e, and `tpu_info` does not carry
         one. What TPU does instead is emulate an fp32 matmul with several bf16
         passes -- `jax.lax.DotAlgorithmPreset` names `BF16_BF16_F32_X3` and
-        `_X6` -- so the fp32 roof is the bf16 roof divided by the pass count.
+        `_X6`. That physics is intact; what changed (ADR-0004) is where the
+        pass count is booked. It multiplies the FLOP count, so nothing divides
+        this: the chip does not acquire a second roof because a kernel asked for
+        more precision, and 197/3 and 197/6 described nothing physical.
 
-        `passes=1` is `precision=DEFAULT` (bf16 multiplies, fp32 accumulate),
-        3 is HIGH, 6 is HIGHEST. Which one a given kernel actually gets is a
-        measurement, not a constant; that is why this is a parameter and not a
-        `peak_fp32_flops` field.
+        An alias of `peak_bf16_flops`, kept because `peak_flops` is the roofline
+        vocabulary word every call site and plot axis reaches for.
         """
-        if passes < 1:
-            raise ValueError(f"passes {passes} must be at least 1")
-        return self.peak_bf16_flops / passes
+        return self.peak_bf16_flops
 
-    def ridge_point(self, passes: int = 1) -> float:
+    @property
+    def ridge_point(self) -> float:
         """Arithmetic intensity (FLOP/byte) where the two roofs cross.
 
-        Below it a kernel is bandwidth-bound, above it compute-bound. Dividing
-        the compute roof by `passes` *lowers* the ridge, so asking for more
-        precision makes a kernel compute-bound at smaller sizes.
+        Below it a kernel is bandwidth-bound, above it compute-bound. There is
+        one ridge, at 240.5 FLOP/byte, and asking for more precision does not
+        lower it -- it slides the kernel's intensity to the right instead, by
+        the pass count. Same crossing, at the same place, reached from the other
+        side.
         """
-        return self.peak_flops(passes) / self.peak_hbm_bandwidth
+        return self.peak_flops / self.peak_hbm_bandwidth
 
 
 GEMMA3_1B = Gemma3Config()
 V5E = TpuV5e()
 
+# bf16 passes each `jax.lax.Precision` costs on v5e, keyed by the label
+# `bench.precision_label` produces. `DEFAULT` is bf16 multiplies with fp32
+# accumulate, so one pass; `HIGH` and `HIGHEST` are the fp32 emulations
+# `BF16_BF16_F32_X3` and `_X6`.
+#
+# The single source of truth for the mapping, and deliberately not exhaustive: a
+# `DotAlgorithmPreset` names its own pass count and does not appear here, so a
+# caller who measured one has to say what it cost rather than inherit a guess.
+BF16_PASSES: Mapping[str, int] = MappingProxyType({"DEFAULT": 1, "HIGH": 3, "HIGHEST": 6})
+
+
+def _bf16_passes(passes: int) -> int:
+    """Validate a bf16 pass count. Shared by both FLOP counters."""
+    if passes < 1:
+        raise ValueError(f"passes {passes} must be at least 1")
+    return passes
+
 
 def attention_flops(
     seq_len: int,
     *,
+    passes: int = 1,
     cfg: Gemma3Config = GEMMA3_1B,
     windowed: bool = False,
     causal: bool = True,
 ) -> int:
-    """FLOPs for one attention layer's prefill over `seq_len` tokens.
+    """Hardware FLOPs for one attention layer's prefill over `seq_len` tokens.
 
     QK^T and PV each cost 2*N*S*D per query head. For the windowed case each
     query attends to at most `sliding_window` keys, so S collapses from N to W --
     this is the asymptotic win the artifact is built on.
+
+    `passes` multiplies the count, as in `mlp_flops`, but here it defaults to 1
+    where `mlp_flops` requires it. The asymmetry is deliberate: every consumer of
+    this function is a *ratio* -- windowed against dense -- and a common factor
+    cancels out of a ratio, so no conclusion drawn from it can turn on the pass
+    count. The material it feeds is bf16 throughout, where 1 is the physical
+    truth. `mlp_flops` feeds an achieved-throughput number, where a wrong pass
+    count is a wrong headline, so that one may not be inherited.
     """
     n = seq_len
     span = min(seq_len, cfg.sliding_window) if windowed else seq_len
     pairs = n * span
     if causal and not windowed:
         pairs //= 2
-    return 4 * pairs * cfg.head_dim * cfg.num_heads
+    return _bf16_passes(passes) * 4 * pairs * cfg.head_dim * cfg.num_heads
 
 
-def mlp_flops(tokens: int, *, cfg: Gemma3Config = GEMMA3_1B) -> int:
-    """FLOPs for one gated-MLP layer over `tokens` tokens.
+def mlp_flops(tokens: int, *, passes: int, cfg: Gemma3Config = GEMMA3_1B) -> int:
+    """Hardware FLOPs for one gated-MLP layer over `tokens` tokens.
 
     Three matmuls -- gate, up, down -- each `tokens x embed_dim x hidden_dim`
-    at 2 FLOPs per multiply-accumulate. The GELU and the elementwise gate are
-    `O(tokens * hidden_dim)` and are dropped, as the roofline convention does.
+    at 2 FLOPs per multiply-accumulate, issued once per bf16 pass. The GELU and
+    the elementwise gate are `O(tokens * hidden_dim)` and are dropped, as the
+    roofline convention does.
+
+    `passes` is required and has no default, and it is the same argument the
+    compute roof used to carry -- moved, not removed. "How many FLOPs is this
+    matmul" has no dtype-free answer on a chip with no fp32 MXU: `DEFAULT` is one
+    bf16 pass, `HIGH` three, `HIGHEST` six, so a call site inheriting 1 would
+    understate an fp32-precision kernel's work by 6x and report six times the
+    throughput it achieved. Use `BF16_PASSES`, or `bench.passes_for` to go
+    straight from a `jax.lax.Precision`.
+
+    The roof, by contrast, *does* have one published value, which is why
+    `roofline_bound`'s `peak_flops` gets a default and this does not.
     """
-    return 6 * tokens * cfg.embed_dim * cfg.hidden_dim
+    return _bf16_passes(passes) * 6 * tokens * cfg.embed_dim * cfg.hidden_dim
 
 
 def mlp_bytes(
@@ -170,10 +227,11 @@ def mlp_bytes(
     """
     if tokens % block_t:
         raise ValueError(f"tokens {tokens} is not divisible by block_t {block_t}")
-    passes = 1 if elide_weights else tokens // block_t
+    # Not to be confused with a bf16 *pass*, which is what `mlp_flops` counts.
+    weight_reads = 1 if elide_weights else tokens // block_t
     weights = 3 * cfg.embed_dim * cfg.hidden_dim * dtype_bytes
     activations = 2 * tokens * cfg.embed_dim * dtype_bytes
-    return passes * weights + activations
+    return weight_reads * weights + activations
 
 
 def arithmetic_intensity(flops: int, bytes_moved: int) -> float:
@@ -187,7 +245,7 @@ def roofline_bound(
     flops: int,
     bytes_moved: int,
     *,
-    peak_flops: float,
+    peak_flops: float = V5E.peak_flops,
     bandwidth: float = V5E.peak_hbm_bandwidth,
 ) -> tuple[float, str]:
     """Return (best achievable seconds, which roof binds).
@@ -195,11 +253,10 @@ def roofline_bound(
     Compares the compute roof against the bandwidth roof so a benchmark can say
     *why* it is slow, not merely that it is.
 
-    `peak_flops` is required and has no default. v5e publishes one peak, for
-    bf16; an fp32-typed kernel runs against that roof divided by however many
-    bf16 passes the requested precision costs, so there is no single number a
-    call site could safely inherit. Use `TpuV5e.peak_flops(passes)`. The
-    bandwidth roof does have one published value, so it keeps its default.
+    `flops` must be a **hardware** count -- `mlp_flops(tokens, passes=...)`, with
+    the bf16 pass count already folded in. Both roofs then default, because both
+    are single published v5e numbers. The fact no call site may inherit is the
+    pass count, and it is enforced where it belongs, on `mlp_flops`.
     """
     compute_s = flops / peak_flops
     memory_s = bytes_moved / bandwidth

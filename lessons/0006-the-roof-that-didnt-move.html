@@ -47,6 +47,17 @@
     Waterman &amp; Patterson, 2008</a>.
   </p>
 
+  <div class="note">
+    <span class="note-label">One roof, and two ways to count a FLOP</span>
+    <p>There is <b>one</b> horizontal roof on a v5e, always: 197 TFLOP/s of bf16. Asking for more
+    numerical precision does not lower it — the chip has no fp32 matmul unit, so it emulates one
+    with three or six bf16 passes, and the extra work lands in the <i>FLOP count</i>, moving your
+    point right and up along the same two lines. Every FLOP figure in this lesson is bf16, hence
+    one pass, so nothing here needs adjusting for it; the distinction matters the moment you
+    report an achieved rate at <code>HIGHEST</code>. See
+    <a href="https://github.com/denis-mil/gemma3-tpu-pallas/blob/main/docs/adr/0004-flop-counts-are-hardware-work.md">ADR-0004</a>.</p>
+  </div>
+
   <h3>The constants, and the disagreement in them</h3>
 
   <p>
@@ -102,6 +113,14 @@ ti.get_tpu_info_for_chip(ti.ChipVersion.TPU_V5E, 1)</code></pre>
     about its algorithm, but about the schedule you gave it. Same maths, different
     <code>BlockSpec</code>s, different intensity. That is why this is the last lesson rather than
     the first: you needed a real grid before the x-axis meant anything.
+  </p>
+
+  <p>
+    The same goes for <code>precision</code>, and it moves the mark further than any
+    <code>BlockSpec</code> will: v5e has no fp32 matmul unit, so an fp32-precision matmul is
+    emulated with three or six bf16 passes, and counting those passes multiplies the intensity by
+    three or six over bytes that never moved. Intensity is a fact about a kernel <i>as executed</i>
+    — schedule and precision both.
   </p>
 
   <p>
@@ -422,6 +441,15 @@ Quiz.mount('#quiz', {
                 'a smaller VMEM working set'],
       answer: 0,
       why: 'It cuts the <i>memory</i> time from 327 µs to 205 µs — and the kernel was already compute-bound at 692 µs, so the floor does not move by one microsecond. This is the practical use of a roofline: it tells you which optimisations are dead before you write them. The same change at <code>B = 256</code>, which is memory-bound, would be worth having. Note what the change actually is — it is <a href="0003-which-axis-goes-last.html">lesson 03</a>\'s question, which axis goes last, asked about the head axis instead of the kv axis, and the answer is the same one: an operand is resident exactly when its <code>index_map</code> ignores the fastest axis.'
+    },
+    {
+      stem: 'You rerun the same matmul at <code>precision=HIGHEST</code>. v5e has no fp32 matmul unit, so it emulates one with six bf16 passes; not one byte of HBM traffic changes. What happens to this kernel\'s position on the roofline?',
+      options: ['the compute roof becomes 32.8',
+                'intensity and rate both 6×',
+                'the ridge point slides left',
+                'nothing moves except the time'],
+      answer: 1,
+      why: 'The passes are work the chip really does, so they belong in the <b>FLOP count</b>: six times the FLOPs over the same bytes puts intensity at 6× and the achieved rate at 6×, and the mark travels up the sloped roof rather than sliding under a lower flat one. <b>The roof does not move — it never did.</b> Dividing 197 by 6 to get 32.8 is the tempting answer and it gives every identical prediction, because <code>6I</code> against <code>P</code> is the same inequality as <code>I</code> against <code>P/6</code>; what it gets wrong is the physics, inventing a ceiling this chip does not have for a workload property. The predicted time is unchanged either way, and it does get six times longer than the same matmul at <code>DEFAULT</code> — that is the point of counting the passes. One catch worth keeping: the achieved rate you now read is <b>hardware</b> FLOP/s, so divide by 6 before comparing it to any published model throughput.'
     }
   ]
 });

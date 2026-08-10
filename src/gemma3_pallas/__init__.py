@@ -2,6 +2,7 @@
 
 from .mlp import fused_gated_mlp
 from .shapes import (
+    BF16_PASSES,
     GEMMA3_1B,
     V5E,
     Gemma3Config,
@@ -14,6 +15,7 @@ from .shapes import (
 )
 
 __all__ = [
+    "BF16_PASSES",
     "GEMMA3_1B",
     "V5E",
     "Gemma3Config",

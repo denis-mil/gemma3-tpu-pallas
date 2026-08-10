@@ -114,9 +114,10 @@ CONTEXT.md        glossary — the project's canonical vocabulary
 
 Two defaults are deliberately unhelpful, because the helpful version fails quietly:
 `fused_gated_mlp(interpret=...)` defaults to **`False`**, so a forgotten argument raises on a
-CPU box rather than timing the emulator; and `roofline_bound` requires `peak_flops`
-explicitly, because v5e publishes only a bf16 peak and an fp32 kernel runs against that
-divided by however many bf16 passes its `precision` costs.
+CPU box rather than timing the emulator; and `mlp_flops` requires `passes` explicitly,
+because v5e has no fp32 matmul unit — an fp32-precision matmul is emulated with 3 or 6 bf16
+passes, so a FLOP count with no pass count understates the work by up to 6x
+([ADR-0004](docs/adr/0004-flop-counts-are-hardware-work.md)).
 
 ## Reading
 

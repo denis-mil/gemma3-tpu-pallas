@@ -93,9 +93,10 @@ def fused_gated_mlp(
     the operand dtype suggests: `DEFAULT` truncates the multiplies to bf16 and
     accumulates in fp32, so **an fp32-typed kernel is not an fp32-precision
     kernel unless asked**. `HIGH` and `HIGHEST` buy back the mantissa with 3 and
-    6 bf16 passes respectively, at 1/3 and 1/6 of the compute roof. On CPU the
-    setting is close to a no-op, which is why the local tests can check that it
-    threads through but not what it costs.
+    6 bf16 passes respectively, so the same matmul costs 3x and 6x the hardware
+    FLOPs against the one 197 TFLOP/s roof, and takes proportionately longer. On
+    CPU the setting is close to a no-op, which is why the local tests can check
+    that it threads through but not what it costs.
 
     On TPU with jax 0.11.0, `HIGH` **does not lower**: Mosaic's `dot_general`
     rule has branches for `DEFAULT` and `HIGHEST` and raises

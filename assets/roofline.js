@@ -52,6 +52,11 @@
   var KV_HEADS = 1;        // shapes.py num_kv_heads — MQA
   var BYTES = 2;           // bf16
 
+  /* One roof, always. v5e has no fp32 matmul unit, so an fp32-precision matmul is
+     emulated with 3 or 6 bf16 passes -- but that pass count belongs in `flops`, not
+     as a divisor here (ADR-0004). BYTES = 2 above means every kernel on this page is
+     bf16, one pass, so its `flops` values are already hardware counts and `computeS`
+     and `ridge` below are already in the current convention. */
   var PEAK_BF16 = 197e12;  // cloud docs AND jax tpu_info agree on this one
 
   /* Three sources, three numbers. The reader can pick and watch the ridge move. */

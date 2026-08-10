@@ -81,3 +81,16 @@ _Avoid_: competitor, target, SOTA
 The lower bound on a kernel's runtime implied by peak compute and peak bandwidth,
 used to say which of the two is binding.
 _Avoid_: theoretical max, peak, limit
+
+**bf16 pass**:
+One traversal of an operand pair through the MXU at bf16. v5e has no fp32 matmul
+unit, so it emulates an fp32-precision multiply with 3 or 6 of them
+(`DotAlgorithmPreset` `BF16_BF16_F32_X3` and `_X6`); `DEFAULT` is one.
+_Avoid_: iteration, round, repeat, weight pass — a weight re-*read* is not a pass
+
+**Hardware FLOPs**:
+What the MXU issues, pass count included. What this project's counters return and
+what both axes of a roofline here carry. Distinguish from **model FLOPs**, which is
+hardware FLOPs divided by the pass count and is what a published throughput figure
+quotes.
+_Avoid_: unqualified "FLOPs" wherever a precision above `DEFAULT` is in play

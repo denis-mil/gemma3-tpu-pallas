@@ -185,7 +185,7 @@ practitioners. Nothing has been posted yet.
   **Session 11 made the question quantitative.** For `fused_gated_mlp` the two answers are
   not "elision or not" in the abstract: the `w_*` `index_map`s vary in the *innermost* grid
   index, so elision cannot bridge the reset of that index between `t` steps, and the weight
-  traffic is `tokens // block_t` passes rather than one. At the headline geometry that is
+  traffic is `tokens // block_t` reads rather than one. At the headline geometry that is
   2 versus 1 transfer per weight per call, 193.5 MB versus 97.9 MB, intensity 63 versus
   125 — a difference large enough to move the kernel across `DEFAULT`'s ridge. Both counts
   are computable (`shapes.mlp_bytes(..., elide_weights=)`), the prediction is registered in

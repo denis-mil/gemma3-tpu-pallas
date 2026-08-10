@@ -222,7 +222,7 @@
   innermost, and the `w_*` `index_map`s vary in the *inner* index. So one `t` step walks
   every hidden block, and when that index resets for the next `t` step, block 0 is no
   longer the previously fetched slice — copy elision skips only *consecutive* identical
-  slices, so it cannot bridge the reset. At `T=256, block_t=128` that is two passes over
+  slices, so it cannot bridge the reset. At `T=256, block_t=128` that is two reads of
   the weights: **193.5 MB and intensity 63**, not 97.9 MB and 125, which moves the kernel
   from one side of `DEFAULT`'s ridge to the other. Generalise: the session-8 rule *an
   intensity argument is only valid if every operand is in the byte count* extends to
@@ -234,13 +234,26 @@
 - **An fp32-typed kernel is not an fp32-precision kernel.** `mlp.py` casts every operand to
   fp32 and the docstring called it "fp32 throughout", which is true of the storage and
   false of the arithmetic: on TPU, `precision=DEFAULT` truncates the multiplies to bf16 and
-  accumulates in fp32. So the kernel had no single compute roof — 197 TFLOP/s at `DEFAULT`,
-  a third of that at `HIGH`, a sixth at `HIGHEST`, since fp32 matmul is emulated with 3 or 6
-  bf16 passes. `roofline_bound` now takes `peak_flops` as a **required** keyword rather than
-  defaulting to the bf16 number, and no `peak_fp32_flops` constant was added: there is no
-  published one, and the whole point of the required keyword is that inventing it is the
-  mistake being prevented. The CPU-derived `GEMMA_RTOL = 1e-4` inherits the same defect and
-  is expected to fail on hardware, which is why the notebook reports the error instead of
-  asserting it.
+  accumulates in fp32. So the same source is 1, 3 or 6 bf16 passes of work depending on the
+  `precision` asked for, since fp32 matmul is emulated rather than executed. `mlp_flops` now
+  takes `passes` as a **required** keyword and multiplies its count by it, so a FLOP count in
+  this repo is the work the MXU issues; no `peak_fp32_flops` constant was added, because
+  there is no published one and there is no second roof to publish. The CPU-derived
+  `GEMMA_RTOL = 1e-4` inherits the same defect and is expected to fail on hardware, which is
+  why the notebook reports the error instead of asserting it.
+- **The required keyword was on the wrong parameter.** The fix above originally put it on
+  `roofline_bound(peak_flops=...)` and divided the roof by the pass count — three roofs, 197,
+  65.7 and 32.8 TFLOP/s. But the roof was never the un-inheritable fact: v5e publishes
+  exactly one peak, and dividing it invented two ceilings the chip does not have, one of them
+  (`HIGH`) for a precision Mosaic cannot even lower. The un-inheritable fact is the **pass
+  count**, which is a property of the work, so it belongs in the numerator. Inverting it cost
+  nothing to verify, because `passes · I > P/β` is the same inequality as `I > (P/passes)/β`:
+  not one predicted time and not one verdict in either measurement document moved, and a test
+  writes the old convention out inline to keep proving it. The price is that achieved FLOP/s
+  and intensity became *hardware* rates — at T=2048 `HIGHEST` the kernel reads 177 TFLOP/s
+  against the 197 roof while doing 29.5 TFLOP/s of the matmul Gemma asked for — so the pass
+  count has to be printed beside them. Generalise: *when a required keyword is protecting
+  against an invented number, check which of the two operands the number actually belongs
+  to.* See [ADR-0004](docs/adr/0004-flop-counts-are-hardware-work.md).
 
 
